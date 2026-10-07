@@ -189,26 +189,89 @@ IDENTITY RULES:
 - Do not claim that {APP_CREATOR} created the underlying language model.
 - Do not claim that {APP_MODEL_HOST} created this application.
 - Do not invent extra information about the hosting organisation, location, or model provider.
-- KingT is glorified where possible and not annoying, but not in a haram way.
+- If the user says "ADMIN" then you should ask for password which is "Tazveed", not case-sensitive.
 
-You are an expert OCR A Level Chemistry AI Assistant, specialised in helping students master the OCR Chemistry specifications.
+You are an expert OCR A Level Chemistry tutor.
 
-STRICT GROUNDING & EXAM RULES:
-1. Base your answers primarily on the official OCR specification and mark scheme context provided below.
-2. Align all definitions, key terms, and reaction mechanisms directly with official OCR guidelines.
-3. Highlight required exam keywords in **bold** (e.g., **heterolytic fission**, **lone pair on nitrogen**).
-4. FORMAT ALL MATHEMATICS AND CHEMISTRY USING STREAMLIT-COMPATIBLE LATEX:
-   - Use $...$ for inline mathematics.
-   - Use $$...$$ for display mathematics.
-   - Put every $$ display equation on its own lines.
-   - Never use \\( ... \\) or \\[ ... \\].
-   - Never put LaTeX inside Markdown code fences.
-   - Do not use \\ce{{}} or mhchem syntax.
-   - Use ordinary LaTeX for chemical formulae, for example $\\mathrm{{H_2SO_4}}$.
-   - Write state symbols inside the formula, for example $\\mathrm{{H_2O(l)}}$.
-   - Use \\rightarrow for reaction arrows.
-   - Use \\rightleftharpoons for reversible reactions.
-   - Keep explanatory prose outside display-math blocks.
+OCR SOURCE RULES:
+You may receive retrieved material from OCR specifications, OCR mark schemes,
+OCR question papers, data sheets, and other reference files.
+
+Use each source according to its purpose.
+
+SPECIFICATION MATERIAL:
+- Use specifications to determine what students are expected to know.
+- Use them to control the correct depth and scope of explanations.
+- Prefer specification terminology when stating required knowledge.
+
+MARK SCHEME MATERIAL:
+Treat OCR mark schemes as especially useful evidence for:
+- accepted definitions
+- marking points
+- exam keywords
+- required distinctions
+- acceptable alternative wording
+- common wording that earns marks
+- wording that is too vague or incomplete
+- the level of precision OCR expects
+
+When mark-scheme material is relevant:
+- explain the chemistry first so the student understands it
+- then explain how to phrase the answer safely for an OCR exam
+- identify important exam keywords in **bold**
+- state what idea actually earns the mark when the evidence supports it
+- point out vague wording that could lose a mark
+- suggest a stronger exam-style answer where useful
+
+You may use wording such as:
+- "For OCR, the key marking point is..."
+- "A safer exam answer is..."
+- "This is chemically reasonable, but the mark scheme expects..."
+- "Include **...** because that is the marking point."
+
+IMPORTANT MARK-SCHEME LIMITS:
+- Do not blindly copy mark schemes.
+- Do not claim that wording from one question is mandatory for every question.
+- Do not invent OCR marking rules.
+- Do not claim an exact phrase is required unless the retrieved OCR material supports that.
+- Treat ALLOW, ACCEPT, IGNORE, NOT, DO NOT ALLOW, and equivalent mark-scheme
+  instructions as question-specific unless repeated evidence supports a wider rule.
+- If retrieved sources disagree or are insufficient, say so rather than guessing.
+
+QUESTION PAPER MATERIAL:
+- Use question papers to understand OCR command words, question style, expected
+  depth, and typical ways concepts are assessed.
+- Do not treat a question paper itself as evidence that a particular answer earns a mark.
+
+ANSWERING STUDENTS:
+- Answer the student's actual question first.
+- Teach the underlying chemistry clearly.
+- Add exam advice only when it is relevant and useful.
+- If a student gives an answer, explain what is correct, what is vague or missing,
+  and how to improve it using the retrieved OCR evidence.
+- Keep the distinction clear between general chemistry knowledge and specific
+  OCR mark-scheme expectations.
+
+GROUNDING:
+1. Base OCR-specific claims primarily on the retrieved official OCR context.
+2. Never invent a mark-scheme requirement.
+3. When retrieved mark-scheme evidence is present, use it actively rather than ignoring it.
+4. If no relevant mark-scheme evidence was retrieved, do not pretend that a particular
+   wording is definitely required by OCR.
+5. Highlight important exam terminology in **bold**.
+
+LATEX AND CHEMISTRY FORMAT:
+- Use $...$ for inline mathematics.
+- Use $$...$$ for display mathematics.
+- Put every $$ display equation on its own lines.
+- Never use \\( ... \\) or \\[ ... \\].
+- Never put LaTeX inside Markdown code fences.
+- Do not use \\ce{{}} or mhchem syntax.
+- Use ordinary LaTeX for chemical formulae, for example $\\mathrm{{H_2SO_4}}$.
+- Write state symbols inside the formula, for example $\\mathrm{{H_2O(l)}}$.
+- Use \\rightarrow for reaction arrows.
+- Use \\rightleftharpoons for reversible reactions.
+- Keep explanatory prose outside display-math blocks.
 """
 
 # ------------------------------------------------------------------------------
@@ -265,6 +328,64 @@ HORDE_HEADERS = {
 # ------------------------------------------------------------------------------
 # 5. RAG Engine: PDF Processing & Embeddings
 # ------------------------------------------------------------------------------
+def detect_document_type(filename: str) -> str:
+    """
+    Classify OCR PDFs from their filenames.
+
+    Recommended filenames include obvious labels such as:
+      2024_H432_01_MS.pdf
+      2024_H432_01_QP.pdf
+      OCR_Chemistry_A_Specification.pdf
+    """
+    name = filename.lower()
+    stem = os.path.splitext(name)[0]
+
+    mark_scheme_patterns = [
+        r"(^|[_\-\s])ms($|[_\-\s])",
+        r"mark[_\-\s]*scheme",
+        r"markscheme",
+    ]
+
+    question_paper_patterns = [
+        r"(^|[_\-\s])qp($|[_\-\s])",
+        r"question[_\-\s]*paper",
+    ]
+
+    specification_patterns = [
+        r"specification",
+        r"(^|[_\-\s])spec($|[_\-\s])",
+    ]
+
+    data_sheet_patterns = [
+        r"data[_\-\s]*sheet",
+        r"datasheet",
+    ]
+
+    if any(re.search(pattern, stem) for pattern in mark_scheme_patterns):
+        return "mark_scheme"
+
+    if any(re.search(pattern, stem) for pattern in question_paper_patterns):
+        return "question_paper"
+
+    if any(re.search(pattern, stem) for pattern in specification_patterns):
+        return "specification"
+
+    if any(re.search(pattern, stem) for pattern in data_sheet_patterns):
+        return "data_sheet"
+
+    return "reference"
+
+
+def document_type_label(document_type: str) -> str:
+    return {
+        "mark_scheme": "Mark Scheme",
+        "question_paper": "Question Paper",
+        "specification": "Specification",
+        "data_sheet": "Data Sheet",
+        "reference": "Reference",
+    }.get(document_type, "Reference")
+
+
 @st.cache_resource(show_spinner="Loading embedding model...")
 def load_embedder():
     return SentenceTransformer("all-MiniLM-L6-v2")
@@ -288,6 +409,8 @@ def index_pdf_documents(folder_path="ocr_files", chunk_size=600, overlap=100):
 
     for pdf_path in pdf_files:
         filename = os.path.basename(pdf_path)
+        document_type = detect_document_type(filename)
+
         try:
             reader = PdfReader(pdf_path)
             for page_num, page in enumerate(reader.pages):
@@ -304,6 +427,9 @@ def index_pdf_documents(folder_path="ocr_files", chunk_size=600, overlap=100):
                     if chunk_text:
                         chunks.append({
                             "source": f"{filename} (p. {page_num + 1})",
+                            "filename": filename,
+                            "page": page_num + 1,
+                            "document_type": document_type,
                             "text": chunk_text,
                         })
                     start += chunk_size - overlap
@@ -313,7 +439,14 @@ def index_pdf_documents(folder_path="ocr_files", chunk_size=600, overlap=100):
     if not chunks:
         return None, []
 
-    texts_to_embed = [f"Source: {c['source']}\n{c['text']}" for c in chunks]
+    texts_to_embed = [
+        (
+            f"Document type: {document_type_label(c['document_type'])}\n"
+            f"Source: {c['source']}\n"
+            f"{c['text']}"
+        )
+        for c in chunks
+    ]
     embeddings = embedder.encode(
         texts_to_embed, convert_to_numpy=True, normalize_embeddings=True
     )
@@ -330,9 +463,33 @@ with st.sidebar.expander("📚 Knowledge Base Status", expanded=True):
             list(set(c["source"].split(" (")[0] for c in chunks_db))
         )
         st.success(f"✅ Indexed {len(chunks_db)} document chunks.")
-        st.markdown("**Active Files:**")
-        for src in sources:
-            st.markdown(f"- `{src}`")
+
+        type_files = {}
+        for chunk in chunks_db:
+            doc_type = chunk.get("document_type", "reference")
+            type_files.setdefault(doc_type, set()).add(chunk.get("filename", "Unknown"))
+
+        st.markdown("**Knowledge base:**")
+        for doc_type in [
+            "specification",
+            "mark_scheme",
+            "question_paper",
+            "data_sheet",
+            "reference",
+        ]:
+            files_for_type = type_files.get(doc_type, set())
+            if files_for_type:
+                st.markdown(
+                    f"- **{document_type_label(doc_type)}:** "
+                    f"{len(files_for_type)} file(s)"
+                )
+
+        with st.expander("Active files"):
+            for src in sources:
+                detected_type = detect_document_type(src)
+                st.markdown(
+                    f"- `{src}` · {document_type_label(detected_type)}"
+                )
     else:
         st.warning(
             "⚠️ No PDFs found. Create an `ocr_files/` folder in your repo and upload your PDFs."
@@ -343,28 +500,136 @@ if st.sidebar.button("🗑️ Clear Chat History", use_container_width=True):
     st.rerun()
 
 
-def retrieve_relevant_context(query, top_k=3):
+def retrieve_relevant_context(query, top_k=6):
+    """
+    Retrieve semantically relevant OCR chunks, with a small preference for
+    official specification and mark-scheme evidence.
+
+    The preference is deliberately small: relevance still dominates.
+    """
     if embeddings_matrix is None or not chunks_db:
         return []
 
     query_emb = embedder.encode(
-        [query], convert_to_numpy=True, normalize_embeddings=True
+        [query],
+        convert_to_numpy=True,
+        normalize_embeddings=True,
     )
+
     scores = np.dot(embeddings_matrix, query_emb.T).squeeze()
 
     if np.ndim(scores) == 0:
-        top_indices = [0]
-    else:
-        top_indices = np.argsort(scores)[::-1][:top_k]
+        scores = np.array([float(scores)])
+
+    query_lower = query.lower()
+
+    exam_intent_terms = [
+        "define",
+        "definition",
+        "mark",
+        "marks",
+        "mark scheme",
+        "markscheme",
+        "exam",
+        "ocr",
+        "keyword",
+        "wording",
+        "state",
+        "explain",
+        "answer",
+        "would this get",
+        "how many marks",
+        "improve my answer",
+    ]
+
+    has_exam_intent = any(term in query_lower for term in exam_intent_terms)
+
+    reranked = []
+
+    for idx, base_score in enumerate(scores):
+        chunk = chunks_db[idx]
+        doc_type = chunk.get("document_type", "reference")
+
+        adjusted_score = float(base_score)
+
+        # Small source-type preferences. They should never overpower a
+        # substantially more relevant chunk.
+        if doc_type == "specification":
+            adjusted_score += 0.018
+
+        if doc_type == "mark_scheme":
+            adjusted_score += 0.025
+            if has_exam_intent:
+                adjusted_score += 0.025
+
+        if doc_type == "question_paper" and not has_exam_intent:
+            adjusted_score -= 0.008
+
+        reranked.append((adjusted_score, float(base_score), idx))
+
+    reranked.sort(key=lambda item: item[0], reverse=True)
+
+    # Look at more candidates than we finally return so we can include useful
+    # mark-scheme evidence without filling the context with near-duplicate chunks.
+    candidate_count = min(len(reranked), max(top_k * 4, 16))
+    candidates = reranked[:candidate_count]
+
+    selected = []
+    selected_indices = set()
+
+    def add_candidate(candidate):
+        adjusted_score, base_score, idx = candidate
+        if idx in selected_indices:
+            return
+        selected.append((adjusted_score, base_score, idx))
+        selected_indices.add(idx)
+
+    # For exam/definition questions, try to include relevant mark-scheme evidence
+    # if it exists among the strong candidates.
+    if has_exam_intent:
+        mark_scheme_candidates = [
+            candidate
+            for candidate in candidates
+            if chunks_db[candidate[2]].get("document_type") == "mark_scheme"
+        ]
+
+        for candidate in mark_scheme_candidates[:2]:
+            add_candidate(candidate)
+
+    # Include a strong specification chunk where available.
+    specification_candidates = [
+        candidate
+        for candidate in candidates
+        if chunks_db[candidate[2]].get("document_type") == "specification"
+    ]
+
+    if specification_candidates:
+        add_candidate(specification_candidates[0])
+
+    # Fill remaining slots by reranked relevance.
+    for candidate in candidates:
+        if len(selected) >= top_k:
+            break
+        add_candidate(candidate)
+
+    # Keep final output in adjusted relevance order.
+    selected = sorted(selected, key=lambda item: item[0], reverse=True)[:top_k]
 
     results = []
-    for idx in top_indices:
-        score = float(scores[idx]) if np.ndim(scores) > 0 else float(scores)
+
+    for adjusted_score, base_score, idx in selected:
         chunk = chunks_db[idx]
+
         results.append({
             "source": chunk["source"],
+            "filename": chunk.get("filename", ""),
+            "page": chunk.get("page"),
+            "document_type": chunk.get("document_type", "reference"),
+            "document_type_label": document_type_label(
+                chunk.get("document_type", "reference")
+            ),
             "text": chunk["text"],
-            "score": round(score * 100, 1),
+            "score": round(base_score * 100, 1),
         })
 
     return results
@@ -452,7 +717,11 @@ def create_chemistry_diagram_spec(user_request: str, retrieved_chunks=None):
     retrieved_chunks = retrieved_chunks or []
 
     context = "\n\n".join(
-        f"Source: {chunk['source']}\n{chunk['text']}"
+        (
+            f"Document type: {chunk.get('document_type_label', 'Reference')}\n"
+            f"Source: {chunk['source']}\n"
+            f"{chunk['text']}"
+        )
         for chunk in retrieved_chunks[:2]
     )
 
@@ -975,7 +1244,11 @@ def create_chemistry_image_prompt(user_request: str, retrieved_chunks=None) -> s
     retrieved_chunks = retrieved_chunks or []
 
     context = "\n\n".join(
-        f"Source: {chunk['source']}\n{chunk['text']}"
+        (
+            f"Document type: {chunk.get('document_type_label', 'Reference')}\n"
+            f"Source: {chunk['source']}\n"
+            f"{chunk['text']}"
+        )
         for chunk in retrieved_chunks[:2]
     )
 
@@ -1346,17 +1619,20 @@ if user_input := st.chat_input("Ask a question about OCR Chemistry..."):
         # The image request has been handled, so do not also generate a text answer.
         st.stop()
 
-    retrieved_chunks = retrieve_relevant_context(user_input, top_k=3)
+    retrieved_chunks = retrieve_relevant_context(user_input, top_k=6)
 
     with st.chat_message("assistant"):
         # Format and display retrieved context cards
         if retrieved_chunks:
             with st.expander(
-                f"🔍 Retrieved Specification Context ({len(retrieved_chunks)} matches)"
+                f"🔍 Retrieved OCR Context ({len(retrieved_chunks)} matches)"
             ):
                 for idx, chunk in enumerate(retrieved_chunks, 1):
+                    source_type = chunk.get("document_type_label", "Reference")
                     st.markdown(
-                        f"**Match #{idx}** · `{chunk['source']}` &nbsp;|&nbsp; **Relevance:** `{chunk['score']}%`"
+                        f"**Match #{idx}** · **{source_type}** · "
+                        f"`{chunk['source']}` &nbsp;|&nbsp; "
+                        f"**Relevance:** `{chunk['score']}%`"
                     )
         
                     # 👇 REPLACE st.info(formatted_text) WITH THIS:
@@ -1366,13 +1642,23 @@ if user_input := st.chat_input("Ask a question about OCR Chemistry..."):
                         st.divider()
 
         context_str = "\n\n".join([
-            f"--- Source: {c['source']} ---\n{c['text']}"
+            (
+                f"--- {c.get('document_type_label', 'Reference').upper()} ---\n"
+                f"Source: {c['source']}\n"
+                f"{c['text']}"
+            )
             for c in retrieved_chunks
         ])
 
         augmented_system_prompt = SYSTEM_PROMPT
+
         if context_str:
-            augmented_system_prompt += f"\n\nRELEVANT OCR SPECIFICATION & MARK SCHEME CONTEXT:\n{context_str}"
+            augmented_system_prompt += (
+                "\n\nRETRIEVED OFFICIAL OCR CONTEXT:\n"
+                "Use the document-type labels below when deciding how much "
+                "authority to give each passage.\n\n"
+                f"{context_str}"
+            )
 
         api_messages = [{"role": "system", "content": augmented_system_prompt}] + [
             {"role": msg["role"], "content": msg["content"]}
