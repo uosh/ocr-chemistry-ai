@@ -347,6 +347,30 @@ HORDE_HEADERS = {
     "Content-Type": "application/json",
 }
 
+
+def _read_int_setting(name: str, default: int, minimum: int = 1) -> int:
+    """Read an integer from Streamlit Secrets or the environment safely."""
+    raw_value = st.secrets.get(name) or os.environ.get(name)
+
+    if raw_value is None:
+        return default
+
+    try:
+        return max(minimum, int(raw_value))
+    except (TypeError, ValueError):
+        return default
+
+
+# Tester limits. You can override these in Streamlit Secrets without editing code.
+MAX_REQUESTS_PER_SESSION = _read_int_setting(
+    "MAX_REQUESTS_PER_SESSION",
+    75,
+)
+MAX_AI_IMAGES_PER_SESSION = _read_int_setting(
+    "MAX_AI_IMAGES_PER_SESSION",
+    5,
+)
+
 # Optional admin authentication. The password is NEVER placed in the model
 # prompt or source code. Configure ADMIN_PASSWORD in Streamlit Secrets.
 admin_password = (
@@ -356,6 +380,12 @@ admin_password = (
 
 if "admin_authenticated" not in st.session_state:
     st.session_state.admin_authenticated = False
+
+if "request_count" not in st.session_state:
+    st.session_state.request_count = 0
+
+if "ai_image_count" not in st.session_state:
+    st.session_state.ai_image_count = 0
 
 if admin_password:
     with st.sidebar.expander("🔐 Admin"):
@@ -381,6 +411,20 @@ if admin_password:
                     st.rerun()
                 else:
                     st.error("Incorrect password.")
+
+
+
+# Ordinary testers only see their own session usage.
+if not st.session_state.admin_authenticated:
+    with st.sidebar.expander("🧪 Testing limits"):
+        st.caption(
+            f"Questions used this session: "
+            f"{st.session_state.request_count}/{MAX_REQUESTS_PER_SESSION}"
+        )
+        st.caption(
+            f"AI images used this session: "
+            f"{st.session_state.ai_image_count}/{MAX_AI_IMAGES_PER_SESSION}"
+        )
 
 
 # ------------------------------------------------------------------------------
@@ -900,17 +944,27 @@ with st.sidebar.expander(
             "⚠️ No PDFs found. Add PDFs to the `ocr_files/` folder."
         )
 
-if st.sidebar.button(
-    "🔄 Reindex Knowledge Base",
-    use_container_width=True,
-):
-    st.cache_data.clear()
-    st.rerun()
+if st.session_state.get("admin_authenticated"):
+    st.sidebar.divider()
+    st.sidebar.markdown("### Admin Controls")
+
+    if st.sidebar.button(
+        "🔄 Reindex Knowledge Base",
+        use_container_width=True,
+    ):
+        st.cache_data.clear()
+        st.rerun()
+
+    st.sidebar.caption(
+        "Admin sessions bypass tester request and image limits."
+    )
 
 if st.sidebar.button(
     "🗑️ Clear Chat History",
     use_container_width=True,
 ):
+    # Only clears this browser session's conversation.
+    # Testing usage counters deliberately remain unchanged.
     st.session_state.messages = []
     st.rerun()
 
@@ -2092,6 +2146,22 @@ for message in st.session_state.messages:
             st.markdown(message["content"])
 
 if user_input := st.chat_input("Ask a question about OCR Chemistry..."):
+    is_admin = st.session_state.get("admin_authenticated", False)
+
+    if (
+        not is_admin
+        and st.session_state.request_count >= MAX_REQUESTS_PER_SESSION
+    ):
+        st.error(
+            "You have reached the testing limit for this session. "
+            "Start a new testing session later or ask the app owner for access."
+        )
+        st.stop()
+
+    # Count one submitted user turn. Admin sessions are not rate-limited.
+    if not is_admin:
+        st.session_state.request_count += 1
+
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
         st.markdown(user_input)
@@ -2163,6 +2233,28 @@ if user_input := st.chat_input("Ask a question about OCR Chemistry..."):
     # AI Horde image request route
     # --------------------------------------------------------------------------
     if is_image_request(user_input):
+        if (
+            not st.session_state.get("admin_authenticated", False)
+            and st.session_state.ai_image_count >= MAX_AI_IMAGES_PER_SESSION
+        ):
+            with st.chat_message("assistant"):
+                message = (
+                    "You have reached the AI image-generation limit "
+                    "for this testing session. Chemistry diagrams still work "
+                    "because they use the built-in vector renderer."
+                )
+                st.warning(message)
+                st.session_state.messages.append(
+                    {
+                        "role": "assistant",
+                        "content": message,
+                    }
+                )
+            st.stop()
+
+        if not st.session_state.get("admin_authenticated", False):
+            st.session_state.ai_image_count += 1
+
         with st.chat_message("assistant"):
             status_placeholder = st.empty()
 
