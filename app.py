@@ -1,6 +1,4 @@
 import os
-import time
-import random
 import streamlit as st
 from google import genai
 from google.genai import types
@@ -12,7 +10,6 @@ st.caption("Grounding strictly on official OCR H432 Specification & Mark Schemes
 
 # 1. API Key Setup
 api_key = None
-
 if "GEMINI_API_KEY" in st.secrets:
     api_key = st.secrets["GEMINI_API_KEY"]
 elif "GEMINI_API_KEY" in os.environ:
@@ -21,111 +18,62 @@ else:
     api_key = st.sidebar.text_input("Enter Gemini API Key", type="password")
 
 if not api_key:
-    st.warning("⚠️ API Key missing. Please set GEMINI_API_KEY in Streamlit Cloud Secrets or enter it in the sidebar.")
+    st.warning("⚠️ API Key missing. Please set GEMINI_API_KEY in Streamlit Cloud Secrets.")
     st.stop()
 
-# Initialize Gemini Client
-try:
-    client = genai.Client(api_key=api_key)
-except Exception as e:
-    st.error(f"Failed to initialize Gemini client: {e}")
-    st.stop()
+# Cache Gemini Client so it doesn't re-instantiate on every Streamlit rerun
+@st.cache_resource
+def get_gemini_client(key):
+    return genai.Client(api_key=key)
 
-# 2. System Instructions for OCR A Grounding
+client = get_gemini_client(api_key)
+
+# 2. System Instruction
 SYSTEM_INSTRUCTION = """
 You are an elite OCR A Level Chemistry (H432) specialist tutor.
-Your single purpose is to help students strictly according to the official OCR A specification, data sheet, and past mark schemes uploaded in context.
+Your single purpose is to help students strictly according to the official OCR A specification, data sheet, and past mark schemes.
 
 STRICT OPERATIONAL RULES:
-1. OCR ONLY: Base your answers ONLY on OCR A guidelines. If a topic, phrasing, or mechanism convention differs from other boards (AQA/Edexcel), enforce the OCR A standard.
-2. Mark Scheme Keywords: OCR mark schemes require specific phrasing. Always highlight required exam keywords in **bold** (e.g., **heterolytic fission**, **curly arrow starting from lone pair/bond**, **electron pair donor**).
-3. Spec Codes: Include official OCR specification references (e.g., Module 3.1.2 (a)) when explaining concepts.
-4. Out of Scope: If a question is outside the OCR A specification, state clearly: "This topic is outside the official OCR A Chemistry (H432) specification."
-5. Mathematical Precision: For physical chemistry calculations (enthalpy, Kc/Kp, pH, rate equations), present full step-by-step working matching OCR mark scheme layouts.
+1. OCR ONLY: Base answers strictly on OCR A guidelines. Enforce OCR conventions over AQA/Edexcel.
+2. Mark Scheme Keywords: Always highlight required exam keywords in **bold** (e.g., **heterolytic fission**, **curly arrow starting from lone pair/bond**).
+3. Spec Codes: Include official OCR specification references (e.g., Module 3.1.2 (a)).
+4. Out of Scope: State clearly if a question is outside the official OCR A Chemistry specification.
+5. Mathematical Precision: For physical chemistry calculations, present full step-by-step working matching OCR mark scheme layouts.
 """
 
-# 3. Document Indexing Setup
-if "ocr_files" not in st.session_state:
-    st.session_state.ocr_files = []
-
-def index_ocr_documents():
-    """Uploads local OCR PDFs from 'ocr_files' folder to Gemini File API once."""
-    uploaded_files = []
-    folder = "ocr_files"
-    if os.path.exists(folder):
-        for filename in os.listdir(folder):
-            if filename.endswith(".pdf"):
-                filepath = os.path.join(folder, filename)
-                try:
-                    g_file = client.files.upload(file=filepath)
-                    uploaded_files.append(g_file)
-                except Exception as e:
-                    st.sidebar.error(f"Error uploading {filename}: {e}")
-    return uploaded_files
-
-with st.sidebar:
-    st.header("OCR Knowledge Base")
-    if st.button("Index OCR PDFs"):
-        with st.spinner("Uploading OCR files..."):
-            st.session_state.ocr_files = index_ocr_documents()
-            if st.session_state.ocr_files:
-                st.success(f"Indexed {len(st.session_state.ocr_files)} OCR PDFs into Gemini context!")
-            else:
-                st.info("No PDF files found in 'ocr_files' folder.")
-
-# 4. Chat Interface
+# 3. Chat State Setup
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Render chat history
+# Display past messages
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Cascade list of models to try if high server traffic occurs
-MODELS_TO_TRY = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.5-pro"]
+# 4. Fast Streaming Generator
+def stream_gemini_response(prompt):
+    """Streams tokens in real time to eliminate perceived latency."""
+    response = client.models.generate_content_stream(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_INSTRUCTION,
+            temperature=0.1,
+        )
+    )
+    for chunk in response:
+        if chunk.text:
+            yield chunk.text
 
-def generate_content_with_retry(contents):
-    """Executes request across fallback models with randomized exponential backoff."""
-    for model_name in MODELS_TO_TRY:
-        for attempt in range(4):
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        system_instruction=SYSTEM_INSTRUCTION,
-                        temperature=0.1,
-                    )
-                )
-                if response and response.text:
-                    return response.text
-            except Exception as e:
-                err_str = str(e)
-                # Retry on temporary server load errors (503, 429, UNAVAILABLE)
-                if any(code in err_str for code in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"]):
-                    # Exponential wait (1s, 2s, 4s, 8s) + random jitter to clear queue lock
-                    sleep_time = (2 ** attempt) + random.uniform(0.5, 1.5)
-                    time.sleep(sleep_time)
-                    continue
-                else:
-                    # Non-transient error; jump directly to next model in sequence
-                    break
-    return None
-
-# User Input
+# 5. Chat Input & Streamed Rendering
 if prompt := st.chat_input("Ask an OCR A Chemistry question..."):
+    # Render user prompt
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
+    # Stream assistant response instantly
     with st.chat_message("assistant"):
-        with st.spinner("Analyzing OCR specification & mark schemes..."):
-            contents = st.session_state.ocr_files + [prompt]
-            answer = generate_content_with_retry(contents)
-
-            if answer:
-                st.markdown(answer)
-                st.session_state.messages.append({"role": "assistant", "content": answer})
-            else:
-                st.error("Google AI servers are experiencing extreme traffic worldwide. Please re-send your question in a moment.")
+        full_response = st.write_stream(stream_gemini_response(prompt))
+        
+    st.session_state.messages.append({"role": "assistant", "content": full_response})
