@@ -68,14 +68,14 @@ def clean_display_text(text: str) -> str:
     return text.strip()
 
 def render_chemistry_chunk(text: str):
-    """Splits and parses text chunks dynamically, isolating equations
+    """Universally parses text and equations, converting raw chemical syntax
 
-    for st.latex() and text for st.markdown().
+    into valid KaTeX blocks so every equation renders properly.
     """
     if not text:
         return
 
-    # Clean HTML breaks and normalize PDF unicode spaces/dashes
+    # 1. Clean HTML breaks and normalize Unicode spaces/dashes
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
     text = text.replace("\xa0", " ").replace("‑", "-").replace("–", "-")
 
@@ -86,28 +86,46 @@ def render_chemistry_chunk(text: str):
         if not stripped:
             continue
 
-        # Regex pattern to find bracketed expressions [...] or blocks with LaTeX/arrows
-        # This separates inline text from equations within the same line
-        # We look for [ ... ] blocks or segments containing \rightarrow, \to, \Delta H, etc.
-        
-        # If the whole line is wrapped in brackets or is an explicit equation line:
-        if (stripped.startswith("[") and stripped.endswith("]")) or any(
-            sym in stripped for sym in ["\\rightarrow", "\\to", "\\begin{aligned}", "kJ mol"]
-        ):
+        # 2. Universal Chemical Equation Detector:
+        # Check if the line contains reaction arrows, delta symbols, or thermodynamic terms
+        has_reaction_signs = any(
+            sym in stripped for sym in ["→", "->", "\\rightarrow", "\\to", "⇌", "rightleftharpoons"]
+        )
+        has_thermo = any(
+            term in stripped for term in ["\\Delta H", "ΔH", "U_{\\latt}", "kJ mol", "kJ mol"]
+        )
+        is_bracketed = (stripped.startswith("[") and stripped.endswith("]")) or (
+            stripped.startswith("$$") and stripped.endswith("$$")
+        )
+
+        if is_bracketed or has_reaction_signs or has_thermo:
             eq_content = stripped
+            
+            # Strip wrappers if present
             if eq_content.startswith("[") and eq_content.endswith("]"):
                 eq_content = eq_content[1:-1].strip()
+            elif eq_content.startswith("$$") and eq_content.endswith("$$"):
+                eq_content = eq_content[2:-2].strip()
 
             eq_content = eq_content.replace("$$", "").strip()
+
+            # Clean up residual \ce{} or text commands
             eq_content = re.sub(r"\\ce\s*\{([^}]*)\}", r"\\text{\1}", eq_content)
+
+            # 3. Smart Fallback for un-escaped arrows or chemistry text
+            # If it uses plain text arrows like '->', convert them to LaTeX '\rightarrow'
+            if "->" in eq_content and "\\rightarrow" not in eq_content:
+                eq_content = eq_content.replace("->", "\\rightarrow")
+            if "→" in eq_content and "\\rightarrow" not in eq_content:
+                eq_content = eq_content.replace("→", "\\rightarrow")
 
             try:
                 st.latex(eq_content)
             except Exception:
+                # If LaTeX syntax fails, fall back gracefully to markdown
                 st.markdown(stripped)
         else:
-            # Check if there are hidden bracketed equations nested inside normal text paragraphs
-            # e.g., "Calculate using [ \Delta H_f ] values."
+            # Check for inline equations embedded inside standard paragraph lines
             parts = re.split(r"(\[.*?\])", stripped)
             for part in parts:
                 if not part.strip():
