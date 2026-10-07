@@ -3,3 +3,4 @@ groq
 pypdf
 sentence-transformers
 numpy
+requests
