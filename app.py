@@ -22,71 +22,46 @@ st.set_page_config(
 # 2. Text Cleaning Helpers
 # ------------------------------------------------------------------------------
 def clean_pdf_text(text: str) -> str:
-    """Universally repairs PDF column-merging artifacts and flattened tables
+    """Cleans PDF text at the source during indexing, stripping \ce tags
 
-    for any chemistry topic without hardcoding specific keywords.
+    and converting bracketed equations into proper math blocks.
     """
     if not text:
         return ""
 
-    # 1. Fix hyphenated words broken across lines (e.g. "enthal-\npy" -> "enthalpy")
+    # 1. Fix hyphenated words broken across lines
     text = re.sub(r"(\w+)-\s*\n\s*(\w+)", r"\1\2", text)
-
-    # 2. Fix camelCase words smashed together by column lines (e.g. "typeDefinition" -> "type Definition")
+    # 2. Fix camelCase words smashed together by column lines
     text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
+    # 3. Replace single line breaks with spaces
+    text = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
 
-    # 3. Insert space between letters and Greek letters/symbols (e.g. "questionΔH" -> "question ΔH")
-    text = re.sub(r"([a-zA-Z])([ΔΣΩθπ])", r"\1 \2", text)
+    # 4. Translate \ce{...} into standard LaTeX \text{...} globally
+    text = re.sub(r"\\ce\s*\{([^}]*)\}", r"\\text{\1}", text)
 
-    # 4. Insert space between closing punctuation/parentheses and starting text (e.g. "values.ΔH" -> "values. ΔH")
-    text = re.sub(r"([\.|\)])([A-ZΔ])", r"\1 \2", text)
+    # 5. Flexible regex to catch square-bracketed equations anywhere in the text
+    # (Matches brackets containing LaTeX commands, arrows, or math symbols, even with trailing spaces)
+    text = re.sub(
+        r"\[\s*([^\n\]]*(?:\\text|\\rightarrow|\\to|=|\+|\-|\*)[^\n\]]*)\s*\]",
+        r"$$\1$$",
+        text,
+    )
 
-    # 5. Insert line breaks before common structural patterns (numbers, bullet indicators, or capital letters following periods)
-    text = re.sub(r"\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*:\s*)", r"\n\n\1", text)
-
-    # 6. Normalize multiple spaces and clean up
+    # 6. Normalize whitespace
     text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-
     return text.strip()
 
 
 def clean_display_text(text: str) -> str:
-    """Bulletproof text cleaner using direct string replacement and robust line parsing."""
+    """Secondary display wrapper for UI rendering."""
     if not text:
         return ""
-
-    # 1. Convert HTML break tags to Markdown newlines
+    # Convert HTML break tags to Markdown newlines
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
-
-    # 2. DIRECT STRING REPLACE for \ce{} (bypasses all regex escape bugs completely)
-    text = text.replace(r"\ce{", r"\text{")
-
-    # 3. Process line-by-line to strip square brackets around equations
-    lines = text.split("\n")
-    cleaned_lines = []
-    
-    for line in lines:
-        stripped = line.strip()
-        
-        # If a line starts with '[' and ends with ']', unwrap it and convert to a $$ block
-        if stripped.startswith("[") and stripped.endswith("]"):
-            inner_content = stripped[1:-1].strip()
-            cleaned_lines.append(f"$$\n{inner_content}\n$$")
-        else:
-            cleaned_lines.append(line)
-            
-    text = "\n".join(cleaned_lines)
-
-    # 4. Universal fallback for any remaining bracketed math expressions within text
-    text = re.sub(r"\[\s*([^\]\n]+)\s*\]", r"$$\1$$", text)
-
-    # 5. Convert standard inline LaTeX delimiters \( ... \) to $ ... $
+    # Convert standard inline LaTeX delimiters \( ... \) to $ ... $
     text = re.sub(r"\\\((.*?)\\\)", r"$\1$", text)
-
-    # 6. Clean up duplicate adjacent words caused by chunk overlap
+    # Clean up duplicate adjacent words caused by chunk overlap
     text = re.sub(r"\b(\w+)\s+\1\b", r"\1", text)
-
     return text.strip()
 
 
