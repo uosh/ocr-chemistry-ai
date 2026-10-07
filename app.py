@@ -1,6 +1,6 @@
 import os
 import streamlit as st
-from openai import OpenAI
+from groq import Groq
 
 # 1. Streamlit Page Configuration
 st.set_page_config(
@@ -29,14 +29,11 @@ groq_api_key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
 
 if not groq_api_key:
     st.sidebar.error("⚠️ `GROQ_API_KEY` not detected.")
-    st.info("Add `GROQ_API_KEY = \"your_api_key_here\"` in Streamlit Secrets (`.streamlit/secrets.toml`).")
+    st.info("Add `GROQ_API_KEY = \"gsk_...\"` in Streamlit Secrets (`.streamlit/secrets.toml`).")
     st.stop()
 
-# Initialize OpenAI client with Groq base URL
-client = OpenAI(
-    base_url="https://api.groq.com/openai/v1",  # <-- MUST BE INCLUDED
-    api_key=groq_api_key
-)
+# Initialize official Groq client directly
+client = Groq(api_key=groq_api_key)
 
 # Clear Conversation Button
 if st.sidebar.button("🗑️ Clear Chat History", use_container_width=True):
