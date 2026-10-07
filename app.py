@@ -80,6 +80,9 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
+# Candidate models ordered by preference
+FALLBACK_MODELS = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+
 # User Input
 if prompt := st.chat_input("Ask an OCR A Chemistry question..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -88,20 +91,29 @@ if prompt := st.chat_input("Ask an OCR A Chemistry question..."):
 
     with st.chat_message("assistant"):
         with st.spinner("Generating answer..."):
-            try:
-                # Combine uploaded OCR documents with prompt
-                contents = st.session_state.ocr_files + [prompt]
-                
-                response = client.models.generate_content(
-                    model="gemini-3.8-flash",
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        system_instruction=SYSTEM_INSTRUCTION,
-                        temperature=0.1,
+            contents = st.session_state.ocr_files + [prompt]
+            response = None
+            last_error = None
+
+            # Attempt each model until one succeeds
+            for model_name in FALLBACK_MODELS:
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=contents,
+                        config=types.GenerateContentConfig(
+                            system_instruction=SYSTEM_INSTRUCTION,
+                            temperature=0.1,
+                        )
                     )
-                )
-                
+                    if response:
+                        break
+                except Exception as e:
+                    last_error = e
+                    continue
+
+            if response:
                 st.markdown(response.text)
                 st.session_state.messages.append({"role": "assistant", "content": response.text})
-            except Exception as e:
-                st.error(f"Gemini API Error: {e}")
+            else:
+                st.error(f"Google servers are currently busy across all flash models. Please try again in a moment. (Error: {last_error})")
