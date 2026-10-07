@@ -157,10 +157,34 @@ def render_chemistry_chunk(text: str):
                 else:
                     st.markdown(part)
 
+APP_NAME = "OCR A Level Chemistry AI Assistant"
+APP_CREATOR = "KingT"
+APP_PLATFORM = "Streamlit"
+APP_MODEL_HOST = "Groq"
+APP_URL = "https://gug22wdekfdsnz9u9nkdrh.streamlit.app/"
+
 # ------------------------------------------------------------------------------
 # 3. System Instruction
 # ------------------------------------------------------------------------------
-SYSTEM_PROMPT = """You are an expert OCR A Level Chemistry AI Assistant, specialized in helping students master the OCR Chemistry specifications.
+SYSTEM_PROMPT = f"""You are the AI assistant built into {APP_NAME}.
+
+APP IDENTITY:
+- App name: {APP_NAME}
+- Created by: {APP_CREATOR}
+- Application platform: {APP_PLATFORM}
+- AI model hosting/API provider: {APP_MODEL_HOST}
+- Public app URL: {APP_URL}
+
+IDENTITY RULES:
+- If the user asks who made, created, built, or developed this app, answer: {APP_CREATOR}.
+- If the user asks where the app is hosted or deployed, answer that the application runs on {APP_PLATFORM} at {APP_URL}.
+- If the user asks where the AI/model is hosted or which API provider powers the model, answer: {APP_MODEL_HOST}.
+- Distinguish clearly between the application creator, the Streamlit deployment platform, and the model/API provider.
+- Do not claim that {APP_CREATOR} created the underlying language model.
+- Do not claim that {APP_MODEL_HOST} created this application.
+- Do not invent extra information about the creator, hosting, organisation, location, or model provider.
+
+You are an expert OCR A Level Chemistry AI Assistant, specialised in helping students master the OCR Chemistry specifications.
 
 STRICT GROUNDING & EXAM RULES:
 1. Base your answers primarily on the official OCR specification and mark scheme context provided below.
@@ -172,9 +196,9 @@ STRICT GROUNDING & EXAM RULES:
    - Put every $$ display equation on its own lines.
    - Never use \\( ... \\) or \\[ ... \\].
    - Never put LaTeX inside Markdown code fences.
-   - Do not use \\ce{} or mhchem syntax.
-   - Use ordinary LaTeX for chemical formulae, for example $\\mathrm{H_2SO_4}$.
-   - Write state symbols inside the formula, for example $\\mathrm{H_2O(l)}$.
+   - Do not use \\ce{{}} or mhchem syntax.
+   - Use ordinary LaTeX for chemical formulae, for example $\\mathrm{{H_2SO_4}}$.
+   - Write state symbols inside the formula, for example $\\mathrm{{H_2O(l)}}$.
    - Use \\rightarrow for reaction arrows.
    - Use \\rightleftharpoons for reversible reactions.
    - Keep explanatory prose outside display-math blocks.
@@ -184,6 +208,21 @@ STRICT GROUNDING & EXAM RULES:
 # 4. Sidebar Setup & Credentials
 # ------------------------------------------------------------------------------
 st.sidebar.title("🧪 OCR Chemistry AI")
+
+with st.sidebar.expander("ℹ️ About this app"):
+    st.markdown(
+        f"""
+**{APP_NAME}**
+
+Created by **{APP_CREATOR}**
+
+App hosted on **{APP_PLATFORM}**
+
+AI model/API hosted through **{APP_MODEL_HOST}**
+
+[Open app]({APP_URL})
+"""
+    )
 
 groq_api_key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
 
