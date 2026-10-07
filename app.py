@@ -1,5 +1,6 @@
 import os
 import time
+import random
 import streamlit as st
 from google import genai
 from google.genai import types
@@ -81,6 +82,37 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
+# Cascade list of models to try if high server traffic occurs
+MODELS_TO_TRY = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.5-pro"]
+
+def generate_content_with_retry(contents):
+    """Executes request across fallback models with randomized exponential backoff."""
+    for model_name in MODELS_TO_TRY:
+        for attempt in range(4):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=SYSTEM_INSTRUCTION,
+                        temperature=0.1,
+                    )
+                )
+                if response and response.text:
+                    return response.text
+            except Exception as e:
+                err_str = str(e)
+                # Retry on temporary server load errors (503, 429, UNAVAILABLE)
+                if any(code in err_str for code in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"]):
+                    # Exponential wait (1s, 2s, 4s, 8s) + random jitter to clear queue lock
+                    sleep_time = (2 ** attempt) + random.uniform(0.5, 1.5)
+                    time.sleep(sleep_time)
+                    continue
+                else:
+                    # Non-transient error; jump directly to next model in sequence
+                    break
+    return None
+
 # User Input
 if prompt := st.chat_input("Ask an OCR A Chemistry question..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -88,34 +120,12 @@ if prompt := st.chat_input("Ask an OCR A Chemistry question..."):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("Generating answer..."):
+        with st.spinner("Analyzing OCR specification & mark schemes..."):
             contents = st.session_state.ocr_files + [prompt]
-            response = None
-            last_error = None
+            answer = generate_content_with_retry(contents)
 
-            # Retry up to 3 times on temporary server demand spikes (503 / 429)
-            for attempt in range(3):
-                try:
-                    response = client.models.generate_content(
-                        model="gemini-3.8-flash",
-                        contents=contents,
-                        config=types.GenerateContentConfig(
-                            system_instruction=SYSTEM_INSTRUCTION,
-                            temperature=0.1,
-                        )
-                    )
-                    if response:
-                        break
-                except Exception as e:
-                    last_error = e
-                    if "503" in str(e) or "UNAVAILABLE" in str(e) or "429" in str(e):
-                        time.sleep(2)
-                        continue
-                    else:
-                        break
-
-            if response:
-                st.markdown(response.text)
-                st.session_state.messages.append({"role": "assistant", "content": response.text})
+            if answer:
+                st.markdown(answer)
+                st.session_state.messages.append({"role": "assistant", "content": answer})
             else:
-                st.error(f"Google servers are experiencing temporary high demand. Please try sending your message again in a moment. (Error: {last_error})")
+                st.error("Google AI servers are experiencing extreme traffic worldwide. Please re-send your question in a moment.")
