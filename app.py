@@ -68,15 +68,19 @@ def clean_display_text(text: str) -> str:
     return text.strip()
 
 def render_chemistry_chunk(text: str):
-    """Parses text chunks line-by-line, rendering equations natively
+    """Parses text chunks line-by-line, normalizing PDF unicode spaces
 
-    using st.latex() and regular text using st.markdown().
+    and rendering equations natively using st.latex().
     """
     if not text:
         return
 
     # Clean HTML breaks first
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    
+    # Normalize non-breaking spaces and weird unicode dashes from PDFs
+    text = text.replace("\xa0", " ").replace("‑", "-").replace("–", "-")
+    
     lines = text.split("\n")
 
     for line in lines:
@@ -84,26 +88,28 @@ def render_chemistry_chunk(text: str):
         if not stripped:
             continue
 
-        # Detect if the line is an equation, reaction, or thermodynamic expression
+        # More robust check for equations, arrows, or thermodynamics
         is_equation = (
             (stripped.startswith("[") and stripped.endswith("]"))
+            or "→" in stripped
             or "\\rightarrow" in stripped
             or "\\to" in stripped
             or "\\begin{aligned}" in stripped
             or "\\Delta H" in stripped
             or "U_{\\latt}" in stripped
+            or "kJ mol" in stripped
         )
 
         if is_equation:
-            # Strip outer square brackets if present
             eq_content = stripped
+            # Strip outer square brackets if present
             if eq_content.startswith("[") and eq_content.endswith("]"):
                 eq_content = eq_content[1:-1].strip()
 
-            # Clean up any leftover Markdown $$ wrappers
+            # Clean up leftover Markdown $$ wrappers or artifacts
             eq_content = eq_content.replace("$$", "").strip()
 
-            # Translate \ce{} just in case it slipped through
+            # Translate any remaining \ce{} tags
             eq_content = re.sub(r"\\ce\s*\{([^}]*)\}", r"\\text{\1}", eq_content)
 
             try:
