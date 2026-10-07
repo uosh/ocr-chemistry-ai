@@ -52,42 +52,39 @@ def clean_pdf_text(text: str) -> str:
 
 
 def clean_display_text(text: str) -> str:
-    """Cleans HTML breaks, translates \ce{} to standard formatting,
-
-    and completely strips square brackets around math/chemistry blocks.
-    """
+    """Bulletproof text cleaner using direct string replacement and robust line parsing."""
     if not text:
         return ""
 
     # 1. Convert HTML break tags to Markdown newlines
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
 
-    # 2. Translate \ce{...} into clean text/LaTeX format
-    # This turns \ce{Na^+} into \text{Na}^+ or similar renderable chemistry syntax
-    text = re.sub(r"\\ce\{([^}]+)\}", r"\\text{\1}", text)
+    # 2. DIRECT STRING REPLACE for \ce{} (bypasses all regex escape bugs completely)
+    text = text.replace(r"\ce{", r"\text{")
 
-    # 3. Aggressively strip square brackets wrapping equations or aligned blocks
-    # Catches [ \begin{aligned} ... \end{aligned} ] and converts to $$ ... $$
-    text = re.sub(
-        r"\[\s*(\\begin\{aligned\}[\s\S]*?\\end\{aligned\})\s*\]",
-        r"$$\1$$",
-        text,
-    )
+    # 3. Process line-by-line to strip square brackets around equations
+    lines = text.split("\n")
+    cleaned_lines = []
+    
+    for line in lines:
+        stripped = line.strip()
+        
+        # If a line starts with '[' and ends with ']', unwrap it and convert to a $$ block
+        if stripped.startswith("[") and stripped.endswith("]"):
+            inner_content = stripped[1:-1].strip()
+            cleaned_lines.append(f"$$\n{inner_content}\n$$")
+        else:
+            cleaned_lines.append(line)
+            
+    text = "\n".join(cleaned_lines)
 
-    # Catches single-line bracketed items like [ \text{...} -> ... ] and unwraps them into $$ ... $$
-    text = re.sub(
-        r"\[\s*([^\n\]]*(?:\\text|\\rightarrow|\\to|=|\+|\-)[^\n\]]*)\s*\]",
-        r"$$\1$$",
-        text,
-    )
+    # 4. Universal fallback for any remaining bracketed math expressions within text
+    text = re.sub(r"\[\s*([^\]\n]+)\s*\]", r"$$\1$$", text)
 
-    # General fallback for any remaining standalone [ ... ] containing chemistry/math characters
-    text = re.sub(r"\[\s*(\\?[A-Za-z0-9_\{\}\+\-\→\=\s\.\(\)\/\^\\]+)\s*\]", r"$$\1$$", text)
-
-    # 4. Convert standard inline LaTeX delimiters \( ... \) to $ ... $
+    # 5. Convert standard inline LaTeX delimiters \( ... \) to $ ... $
     text = re.sub(r"\\\((.*?)\\\)", r"$\1$", text)
 
-    # 5. Clean up duplicate adjacent words caused by chunk overlap
+    # 6. Clean up duplicate adjacent words caused by chunk overlap
     text = re.sub(r"\b(\w+)\s+\1\b", r"\1", text)
 
     return text.strip()
