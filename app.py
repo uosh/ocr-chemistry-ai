@@ -204,6 +204,15 @@ SPECIFICATION MATERIAL:
 - Use them to control the correct depth and scope of explanations.
 - Prefer specification terminology when stating required knowledge.
 
+PAPER NUMBER CONVENTION:
+- For mark-scheme and question-paper filenames in this app, a filename ending
+  with "(1)" before ".pdf" means Paper 2.
+- The corresponding file without "(1)" is Paper 1.
+- Example: "June 2024 MS.pdf" is Paper 1.
+- Example: "June 2024 MS (1).pdf" is Paper 2.
+- Use the supplied Paper 1 / Paper 2 metadata when discussing where retrieved
+  evidence came from.
+
 MARK SCHEME MATERIAL:
 Treat OCR mark schemes as especially useful evidence for:
 - accepted definitions
