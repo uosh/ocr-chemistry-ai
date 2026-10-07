@@ -52,9 +52,9 @@ def clean_pdf_text(text: str) -> str:
 
 
 def clean_display_text(text: str) -> str:
-    """Robustly cleans display text, translating \ce{} and converting
+    """Cleans HTML breaks, translates \ce{} to standard formatting,
 
-    any square-bracketed math lines into proper $$ blocks line by line.
+    and completely strips square brackets around math/chemistry blocks.
     """
     if not text:
         return ""
@@ -62,53 +62,30 @@ def clean_display_text(text: str) -> str:
     # 1. Convert HTML break tags to Markdown newlines
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
 
-    # 2. Translate \ce{...} into standard LaTeX \text{...}
-    text = re.sub(r"\\ce\{(.*?)\}", r"\\text{\1}", text)
+    # 2. Translate \ce{...} into clean text/LaTeX format
+    # This turns \ce{Na^+} into \text{Na}^+ or similar renderable chemistry syntax
+    text = re.sub(r"\\ce\{([^}]+)\}", r"\\text{\1}", text)
 
-    # 3. Convert standard inline LaTeX delimiters \( ... \) to $ ... $
+    # 3. Aggressively strip square brackets wrapping equations or aligned blocks
+    # Catches [ \begin{aligned} ... \end{aligned} ] and converts to $$ ... $$
+    text = re.sub(
+        r"\[\s*(\\begin\{aligned\}[\s\S]*?\\end\{aligned\})\s*\]",
+        r"$$\1$$",
+        text,
+    )
+
+    # Catches single-line bracketed items like [ \text{...} -> ... ] and unwraps them into $$ ... $$
+    text = re.sub(
+        r"\[\s*([^\n\]]*(?:\\text|\\rightarrow|\\to|=|\+|\-)[^\n\]]*)\s*\]",
+        r"$$\1$$",
+        text,
+    )
+
+    # General fallback for any remaining standalone [ ... ] containing chemistry/math characters
+    text = re.sub(r"\[\s*(\\?[A-Za-z0-9_\{\}\+\-\→\=\s\.\(\)\/\^\\]+)\s*\]", r"$$\1$$", text)
+
+    # 4. Convert standard inline LaTeX delimiters \( ... \) to $ ... $
     text = re.sub(r"\\\((.*?)\\\)", r"$\1$", text)
-
-    # 4. Process line by line to reliably catch square-bracketed equations
-    lines = text.split("\n")
-    processed_lines = []
-    
-    in_aligned_block = False
-    aligned_buffer = []
-
-    for line in lines:
-        stripped = line.strip()
-        
-        # Handle multi-line \begin{aligned} ... \end{aligned} blocks inside brackets
-        if "\\begin{aligned}" in stripped:
-            in_aligned_block = True
-            # Remove leading '[' if present
-            cleaned_start = re.sub(r"^\[\s*", "", stripped)
-            aligned_buffer.append(cleaned_start)
-            continue
-            
-        if "\\end{aligned}" in stripped:
-            in_aligned_block = False
-            # Remove trailing ']' if present
-            cleaned_end = re.sub(r"\s*\]$", "", stripped)
-            aligned_buffer.append(cleaned_end)
-            # Wrap the whole block in $$
-            full_block = "\n".join(aligned_buffer)
-            processed_lines.append(f"$$\n{full_block}\n$$")
-            aligned_buffer = []
-            continue
-            
-        if in_aligned_block:
-            aligned_buffer.append(stripped)
-            continue
-
-        # Check for single-line bracketed equations like [ \text{...} -> ... ]
-        if stripped.startswith("[") and stripped.endswith("]"):
-            inner_content = stripped[1:-1].strip()
-            processed_lines.append(f"$$\n{inner_content}\n$$")
-        else:
-            processed_lines.append(line)
-
-    text = "\n".join(processed_lines)
 
     # 5. Clean up duplicate adjacent words caused by chunk overlap
     text = re.sub(r"\b(\w+)\s+\1\b", r"\1", text)
