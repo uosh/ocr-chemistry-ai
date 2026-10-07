@@ -12,7 +12,6 @@ st.caption("Grounding strictly on official OCR H432 Specification & Mark Schemes
 # 1. API Key Setup
 api_key = None
 
-# Streamlit Secrets Check
 if "GEMINI_API_KEY" in st.secrets:
     api_key = st.secrets["GEMINI_API_KEY"]
 elif "GEMINI_API_KEY" in os.environ:
@@ -24,14 +23,14 @@ if not api_key:
     st.warning("⚠️ GEMINI_API_KEY is missing. Please add it to your Streamlit Secrets (`.streamlit/secrets.toml`) or enter it in the sidebar.")
     st.stop()
 
-# Initialize Client
-try:
-    client = genai.Client(api_key=api_key)
-except Exception as e:
-    st.error(f"Failed to initialize Gemini Client: {e}")
-    st.stop()
+# Initialize Cached Client
+@st.cache_resource
+def get_gemini_client(key):
+    return genai.Client(api_key=key)
 
-# 2. System Instructions
+client = get_gemini_client(api_key)
+
+# 2. System Instruction
 SYSTEM_INSTRUCTION = """
 You are an elite OCR A Level Chemistry (H432) specialist tutor.
 Your single purpose is to help students strictly according to the official OCR A specification, data sheet, and past mark schemes.
@@ -52,12 +51,12 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# 4. Safe Streaming Generator Function
+# 4. Safe Fast Streaming Generator Function
 def stream_gemini_response(prompt):
-    """Streams response from Gemini with error handling for API issues."""
+    """Streams response from Gemini 3.8 Flash with error handling for API issues."""
     try:
         response = client.models.generate_content_stream(
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION,
