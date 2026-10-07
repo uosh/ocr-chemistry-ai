@@ -1,4 +1,5 @@
 import os
+import time
 import streamlit as st
 from google import genai
 from google.genai import types
@@ -80,9 +81,6 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Candidate models ordered by preference
-FALLBACK_MODELS = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
-
 # User Input
 if prompt := st.chat_input("Ask an OCR A Chemistry question..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -95,11 +93,11 @@ if prompt := st.chat_input("Ask an OCR A Chemistry question..."):
             response = None
             last_error = None
 
-            # Attempt each model until one succeeds
-            for model_name in FALLBACK_MODELS:
+            # Retry up to 3 times on temporary server demand spikes (503 / 429)
+            for attempt in range(3):
                 try:
                     response = client.models.generate_content(
-                        model=model_name,
+                        model="gemini-3.8-flash",
                         contents=contents,
                         config=types.GenerateContentConfig(
                             system_instruction=SYSTEM_INSTRUCTION,
@@ -110,10 +108,14 @@ if prompt := st.chat_input("Ask an OCR A Chemistry question..."):
                         break
                 except Exception as e:
                     last_error = e
-                    continue
+                    if "503" in str(e) or "UNAVAILABLE" in str(e) or "429" in str(e):
+                        time.sleep(2)
+                        continue
+                    else:
+                        break
 
             if response:
                 st.markdown(response.text)
                 st.session_state.messages.append({"role": "assistant", "content": response.text})
             else:
-                st.error(f"Google servers are currently busy across all flash models. Please try again in a moment. (Error: {last_error})")
+                st.error(f"Google servers are experiencing temporary high demand. Please try sending your message again in a moment. (Error: {last_error})")
