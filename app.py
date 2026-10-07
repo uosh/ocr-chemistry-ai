@@ -52,18 +52,26 @@ def clean_pdf_text(text: str) -> str:
 
 
 def clean_display_text(text: str) -> str:
-    """Converts HTML break tags to newlines and fixes raw LaTeX delimiters for Streamlit rendering."""
+    """Cleans HTML, fixes square-bracket LaTeX/mhchem blocks, and removes overlap duplicates."""
     if not text:
         return ""
+    
     # Convert HTML break tags to Markdown newlines
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
 
-    # Convert LaTeX wrapped in parentheses like ( \text{NO}_2^{+} ) to $\text{NO}_2^{+}$
-    text = re.sub(r"\(\s*(\\text\{.*?\}.*?)\s*\)", r"$\1$", text)
+    # Convert literal square brackets wrapping LaTeX/chem blocks [ \ce{...} ] to $$ ... $$
+    text = re.sub(r"\[\s*(\\ce\{.*?\}[\s\S]*?)\s*\]", r"$$\1$$", text)
+    text = re.sub(r"\[\s*(\\text\{.*?\}[\s\S]*?)\s*\]", r"$$\1$$", text)
+    
+    # General fallback for any bracketed math line
+    text = re.sub(r"\[\s*(\\?[A-Za-z0-9\\_\{\}\+\-\→\=\s\.\(\)\/\^\s]+)\s*\]", r"$$\1$$", text)
 
-    # Convert standard LaTeX delimiters \(...\) or \[...\] to $...$ and $$...$$
+    # Convert standard LaTeX delimiters \( ... \) or \[ ... \] to $ ... $ and $$ ... $$
     text = re.sub(r"\\\((.*?)\\\)", r"$\1$", text)
     text = re.sub(r"\\\[(.*?)\\]", r"$$\1$$", text)
+
+    # Clean up duplicate adjacent words caused by PDF chunk overlaps (e.g., "MgCl2 MgCl2")
+    text = re.sub(r"\b(\w+)\s+\1\b", r"\1", text)
 
     return text.strip()
 
