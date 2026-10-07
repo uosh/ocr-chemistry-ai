@@ -2,6 +2,7 @@ import os
 import streamlit as st
 from google import genai
 from google.genai import types
+from google.genai.errors import APIError
 
 # Page Config
 st.set_page_config(page_title="OCR A Chemistry Tutor", page_icon="🧪")
@@ -10,6 +11,8 @@ st.caption("Grounding strictly on official OCR H432 Specification & Mark Schemes
 
 # 1. API Key Setup
 api_key = None
+
+# Streamlit Secrets Check
 if "GEMINI_API_KEY" in st.secrets:
     api_key = st.secrets["GEMINI_API_KEY"]
 elif "GEMINI_API_KEY" in os.environ:
@@ -18,17 +21,17 @@ else:
     api_key = st.sidebar.text_input("Enter Gemini API Key", type="password")
 
 if not api_key:
-    st.warning("⚠️ API Key missing. Please set GEMINI_API_KEY in Streamlit Cloud Secrets.")
+    st.warning("⚠️ GEMINI_API_KEY is missing. Please add it to your Streamlit Secrets (`.streamlit/secrets.toml`) or enter it in the sidebar.")
     st.stop()
 
-# Cache Gemini Client so it doesn't re-instantiate on every Streamlit rerun
-@st.cache_resource
-def get_gemini_client(key):
-    return genai.Client(api_key=key)
+# Initialize Client
+try:
+    client = genai.Client(api_key=api_key)
+except Exception as e:
+    st.error(f"Failed to initialize Gemini Client: {e}")
+    st.stop()
 
-client = get_gemini_client(api_key)
-
-# 2. System Instruction
+# 2. System Instructions
 SYSTEM_INSTRUCTION = """
 You are an elite OCR A Level Chemistry (H432) specialist tutor.
 Your single purpose is to help students strictly according to the official OCR A specification, data sheet, and past mark schemes.
@@ -41,38 +44,40 @@ STRICT OPERATIONAL RULES:
 5. Mathematical Precision: For physical chemistry calculations, present full step-by-step working matching OCR mark scheme layouts.
 """
 
-# 3. Chat State Setup
+# 3. Chat History Setup
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display past messages
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# 4. Fast Streaming Generator
+# 4. Safe Streaming Generator Function
 def stream_gemini_response(prompt):
-    """Streams tokens in real time to eliminate perceived latency."""
-    response = client.models.generate_content_stream(
-        model="gemini-2.5-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_INSTRUCTION,
-            temperature=0.1,
+    """Streams response from Gemini with error handling for API issues."""
+    try:
+        response = client.models.generate_content_stream(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION,
+                temperature=0.1,
+            )
         )
-    )
-    for chunk in response:
-        if chunk.text:
-            yield chunk.text
+        for chunk in response:
+            if chunk.text:
+                yield chunk.text
+    except APIError as e:
+        yield f"\n\n⚠️ **Gemini API Error ({e.code})**: {e.message}"
+    except Exception as e:
+        yield f"\n\n⚠️ **Unexpected Error**: {str(e)}"
 
-# 5. Chat Input & Streamed Rendering
+# 5. User Input and Handling
 if prompt := st.chat_input("Ask an OCR A Chemistry question..."):
-    # Render user prompt
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Stream assistant response instantly
     with st.chat_message("assistant"):
         full_response = st.write_stream(stream_gemini_response(prompt))
         
