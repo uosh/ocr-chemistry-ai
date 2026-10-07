@@ -265,4 +265,9 @@ if user_input := st.chat_input("Ask a question about OCR Chemistry..."):
                 response_placeholder.markdown(full_response + "▌")
 
             response_placeholder.markdown(full_response)
-            st.session_
+            st.session_state.messages.append(
+                {"role": "assistant", "content": full_response}
+            )
+
+        except Exception as err:
+            st.error(f"API Error encountered: {str(err)}")
