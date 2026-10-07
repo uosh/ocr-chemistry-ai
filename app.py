@@ -81,8 +81,8 @@ client = Groq(api_key=groq_api_key)
 selected_model = st.sidebar.selectbox(
     "Active Groq Model",
     options=[
-        "llama-3.3-70b-versatile",
-        "qwen-2.5-32b",
+        "openai/gpt-oss-120b",
+        "qwen/qwen3.6-27b",
         "llama-3.1-8b-instant",
     ],
     index=0,
