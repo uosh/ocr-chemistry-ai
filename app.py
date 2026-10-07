@@ -8,7 +8,7 @@ st.set_page_config(page_title="OCR A Chemistry Tutor", page_icon="🧪")
 st.title("🧪 OCR A Level Chemistry AI Assistant")
 st.caption("Grounding strictly on official OCR H432 Specification & Mark Schemes")
 
-# 1. API Key Setup (Explicitly check Streamlit Secrets first)
+# 1. API Key Setup
 api_key = None
 
 if "GEMINI_API_KEY" in st.secrets:
@@ -42,9 +42,12 @@ STRICT OPERATIONAL RULES:
 5. Mathematical Precision: For physical chemistry calculations (enthalpy, Kc/Kp, pH, rate equations), present full step-by-step working matching OCR mark scheme layouts.
 """
 
-# 3. Document Processing
-def get_ocr_documents():
-    """Uploads local OCR PDFs from 'ocr_files' folder to Gemini File API."""
+# 3. Document Indexing Setup
+if "ocr_files" not in st.session_state:
+    st.session_state.ocr_files = []
+
+def index_ocr_documents():
+    """Uploads local OCR PDFs from 'ocr_files' folder to Gemini File API once."""
     uploaded_files = []
     folder = "ocr_files"
     if os.path.exists(folder):
@@ -62,9 +65,9 @@ with st.sidebar:
     st.header("OCR Knowledge Base")
     if st.button("Index OCR PDFs"):
         with st.spinner("Uploading OCR files..."):
-            files = get_ocr_documents()
-            if files:
-                st.success(f"Indexed {len(files)} OCR PDFs into Gemini context!")
+            st.session_state.ocr_files = index_ocr_documents()
+            if st.session_state.ocr_files:
+                st.success(f"Indexed {len(st.session_state.ocr_files)} OCR PDFs into Gemini context!")
             else:
                 st.info("No PDF files found in 'ocr_files' folder.")
 
@@ -86,8 +89,8 @@ if prompt := st.chat_input("Ask an OCR A Chemistry question..."):
     with st.chat_message("assistant"):
         with st.spinner("Generating answer..."):
             try:
-                ocr_files = get_ocr_documents()
-                contents = ocr_files + [prompt]
+                # Combine uploaded OCR documents with prompt
+                contents = st.session_state.ocr_files + [prompt]
                 
                 response = client.models.generate_content(
                     model="gemini-2.5-flash",
