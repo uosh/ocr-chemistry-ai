@@ -67,6 +67,51 @@ def clean_display_text(text: str) -> str:
     text = re.sub(r"\b(\w+)\s+\1\b", r"\1", text)
     return text.strip()
 
+def render_chemistry_chunk(text: str):
+    """Parses text chunks line-by-line, rendering equations natively
+
+    using st.latex() and regular text using st.markdown().
+    """
+    if not text:
+        return
+
+    # Clean HTML breaks first
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    lines = text.split("\n")
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        # Detect if the line is an equation, reaction, or thermodynamic expression
+        is_equation = (
+            (stripped.startswith("[") and stripped.endswith("]"))
+            or "\\rightarrow" in stripped
+            or "\\to" in stripped
+            or "\\begin{aligned}" in stripped
+            or "\\Delta H" in stripped
+            or "U_{\\latt}" in stripped
+        )
+
+        if is_equation:
+            # Strip outer square brackets if present
+            eq_content = stripped
+            if eq_content.startswith("[") and eq_content.endswith("]"):
+                eq_content = eq_content[1:-1].strip()
+
+            # Clean up any leftover Markdown $$ wrappers
+            eq_content = eq_content.replace("$$", "").strip()
+
+            # Translate \ce{} just in case it slipped through
+            eq_content = re.sub(r"\\ce\s*\{([^}]*)\}", r"\\text{\1}", eq_content)
+
+            try:
+                st.latex(eq_content)
+            except Exception:
+                st.markdown(stripped)
+        else:
+            st.markdown(stripped)
 
 # ------------------------------------------------------------------------------
 # 3. System Instruction
@@ -246,8 +291,10 @@ if user_input := st.chat_input("Ask a question about OCR Chemistry..."):
                     st.markdown(
                         f"**Match #{idx}** · `{chunk['source']}` &nbsp;|&nbsp; **Relevance:** `{chunk['score']}%`"
                     )
-                    formatted_text = clean_display_text(chunk["text"])
-                    st.info(formatted_text)
+        
+                    # 👇 REPLACE st.info(formatted_text) WITH THIS:
+                    render_chemistry_chunk(chunk["text"])
+        
                     if idx < len(retrieved_chunks):
                         st.divider()
 
