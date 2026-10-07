@@ -55,16 +55,33 @@ def clean_pdf_text(text: str) -> str:
     text = re.sub(r"[ \t]+", " ", text)
     return text.strip()
 
-def clean_display_text(text: str) -> str:
-    """Secondary display wrapper for UI rendering."""
+def normalize_ai_response(text: str) -> str:
+    """Normalize model output into Streamlit-compatible Markdown and LaTeX."""
     if not text:
         return ""
-    # Convert HTML break tags to Markdown newlines
+
+    # Normalize HTML line breaks and unusual spaces/dashes.
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
-    # Convert standard inline LaTeX delimiters \( ... \) to $ ... $
-    text = re.sub(r"\\\((.*?)\\\)", r"$\1$", text)
-    # Clean up duplicate adjacent words caused by chunk overlap
-    text = re.sub(r"\b(\w+)\s+\1\b", r"\1", text)
+    text = text.replace("\xa0", " ").replace("‑", "-").replace("–", "-")
+
+    # Convert common model LaTeX delimiters to Streamlit Markdown delimiters.
+    # \( ... \) -> $ ... $
+    text = re.sub(r"\\\((.*?)\\\)", r"$\1$", text, flags=re.DOTALL)
+
+    # \[ ... \] -> $$ ... $$
+    text = re.sub(
+        r"\\\[(.*?)\\\]",
+        lambda m: "\n$$\n" + m.group(1).strip() + "\n$$\n",
+        text,
+        flags=re.DOTALL,
+    )
+
+    # Keep display-math delimiters on their own lines.
+    text = re.sub(r"[ \t]*\$\$[ \t]*", "\n$$\n", text)
+
+    # Avoid excessive blank lines introduced during normalization.
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
     return text.strip()
 
 def render_chemistry_chunk(text: str):
@@ -149,7 +166,18 @@ STRICT GROUNDING & EXAM RULES:
 1. Base your answers primarily on the official OCR specification and mark scheme context provided below.
 2. Align all definitions, key terms, and reaction mechanisms directly with official OCR guidelines.
 3. Highlight required exam keywords in **bold** (e.g., **heterolytic fission**, **lone pair on nitrogen**).
-4. Use LaTeX ($...$ for inline, $$...$$ for block equations) for calculations and chemical formulas.
+4. FORMAT ALL MATHEMATICS AND CHEMISTRY USING STREAMLIT-COMPATIBLE LATEX:
+   - Use $...$ for inline mathematics.
+   - Use $$...$$ for display mathematics.
+   - Put every $$ display equation on its own lines.
+   - Never use \\( ... \\) or \\[ ... \\].
+   - Never put LaTeX inside Markdown code fences.
+   - Do not use \\ce{} or mhchem syntax.
+   - Use ordinary LaTeX for chemical formulae, for example $\\mathrm{H_2SO_4}$.
+   - Write state symbols inside the formula, for example $\\mathrm{H_2O(l)}$.
+   - Use \\rightarrow for reaction arrows.
+   - Use \\rightleftharpoons for reversible reactions.
+   - Keep explanatory prose outside display-math blocks.
 """
 
 # ------------------------------------------------------------------------------
@@ -299,7 +327,10 @@ if "messages" not in st.session_state:
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+        if message["role"] == "assistant":
+            st.markdown(normalize_ai_response(message["content"]))
+        else:
+            st.markdown(message["content"])
 
 if user_input := st.chat_input("Ask a question about OCR Chemistry..."):
     st.session_state.messages.append({"role": "user", "content": user_input})
@@ -353,9 +384,17 @@ if user_input := st.chat_input("Ask a question about OCR Chemistry..."):
             for chunk in stream:
                 content = chunk.choices[0].delta.content or ""
                 full_response += content
-                response_placeholder.markdown(full_response + "▌")
 
-            response_placeholder.markdown(full_response)
+                # During streaming, render as plain text. This prevents
+                # Streamlit/KaTeX from parsing incomplete $...$ or $$...$$ blocks.
+                response_placeholder.text(full_response + " ▌")
+
+            # Once the model has finished, normalize the complete response and
+            # render Markdown/LaTeX only once.
+            formatted_response = normalize_ai_response(full_response)
+            response_placeholder.markdown(formatted_response)
+
+            # Store the raw model output. Normalization is a display concern only.
             st.session_state.messages.append(
                 {"role": "assistant", "content": full_response}
             )
