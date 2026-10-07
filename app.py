@@ -1,107 +1,184 @@
 import os
+import glob
+import numpy as np
 import streamlit as st
+from pypdf import PdfReader
+from sentence_transformers import SentenceTransformer
 from groq import Groq
 
-
-# 1. Streamlit Page Configuration
+# 1. Page Config
 st.set_page_config(
-    page_title="OCR Chemistry AI",
+    page_title="OCR Chemistry AI (RAG)",
     page_icon="🧪",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# 2. OCR A Level Chemistry System Prompt
-SYSTEM_PROMPT = """You are an expert OCR A Level Chemistry AI Assistant, specialized in helping students master the OCR Chemistry A and B specifications.
+# 2. System Instruction
+SYSTEM_PROMPT = """You are an expert OCR A Level Chemistry AI Assistant, specialized in helping students master the OCR Chemistry specifications.
 
-Key Guidelines:
-1. Provide precise, step-by-step explanations for Physical, Inorganic, and Organic Chemistry topics.
-2. Align all definitions, key terms, and reaction mechanisms directly with official OCR mark schemes (e.g., exact wording for enthalpy definitions, electron pair repulsion theory, curly arrow mechanisms).
-3. Use LaTeX formatting ($...$ for inline formulas, $$...$$ for standalone equations) for mathematical calculations (e.g., pH, Ka, Arrhenius, rate equations, mole calculations).
-4. Highlight common student pitfalls and OCR exam tips whenever relevant.
+STRICT GROUNDING & EXAM RULES:
+1. Base your answers primarily on the official OCR specification and mark scheme context provided below.
+2. Align all definitions, key terms, and reaction mechanisms directly with official OCR guidelines.
+3. Highlight required exam keywords in **bold** (e.g., **heterolytic fission**, **lone pair on nitrogen**).
+4. Use LaTeX ($...$ for inline, $$...$$ for block equations) for calculations and chemical formulas.
 """
 
-# 3. Sidebar Configuration
+# 3. Sidebar Setup & Key Verification
 st.sidebar.title("🧪 OCR Chemistry AI")
 
-# Retrieve API key from secrets or environment variables
 groq_api_key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
 
 if not groq_api_key:
-    st.sidebar.error("⚠️ `GROQ_API_KEY` not detected.")
-    st.info("Add `GROQ_API_KEY = \"gsk_...\"` in Streamlit Secrets (`.streamlit/secrets.toml`).")
+    st.sidebar.error("⚠️ `GROQ_API_KEY` missing in Streamlit Secrets.")
     st.stop()
 
-# Initialize Groq client
 client = Groq(api_key=groq_api_key)
 
-# Model selector for active Groq endpoints
 selected_model = st.sidebar.selectbox(
     "Active Groq Model",
     options=[
         "openai/gpt-oss-120b",
         "qwen/qwen3.6-27b",
-        "openai/gpt-oss-20b",
         "llama-3.1-8b-instant"
     ],
     index=0
 )
 
-# Clear Conversation Button
+# 4. RAG Engine: PDF Loading & Embedding Pipeline
+@st.cache_resource(show_spinner="Loading embedding model...")
+def load_embedder():
+    # Lightweight CPU-friendly embedding model
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
+embedder = load_embedder()
+
+@st.cache_data(show_spinner="Processing PDF Knowledge Base...")
+def index_pdf_documents(folder_path="ocr_files", chunk_size=600, overlap=100):
+    """Parses all PDFs in folder_path, chunks text, and creates embeddings."""
+    pdf_files = glob.glob(os.path.join(folder_path, "*.pdf"))
+    
+    # Fallback to root directory if folder doesn't exist
+    if not pdf_files:
+        pdf_files = glob.glob("*.pdf")
+
+    if not pdf_files:
+        return None, []
+
+    chunks = []
+    
+    for pdf_path in pdf_files:
+        filename = os.path.basename(pdf_path)
+        try:
+            reader = PdfReader(pdf_path)
+            for page_num, page in enumerate(reader.pages):
+                text = page.extract_text() or ""
+                if not text.strip():
+                    continue
+                
+                # Simple character-level sliding window chunking
+                start = 0
+                while start < len(text):
+                    end = start + chunk_size
+                    chunk_text = text[start:end].strip()
+                    if chunk_text:
+                        chunks.append({
+                            "source": f"{filename} (p. {page_num + 1})",
+                            "text": chunk_text
+                        })
+                    start += (chunk_size - overlap)
+        except Exception as e:
+            st.sidebar.error(f"Error reading {filename}: {e}")
+
+    if not chunks:
+        return None, []
+
+    # Generate embeddings matrix
+    texts_to_embed = [f"Source: {c['source']}\n{c['text']}" for c in chunks]
+    embeddings = embedder.encode(texts_to_embed, convert_to_numpy=True, normalize_embeddings=True)
+
+    return embeddings, chunks
+
+embeddings_matrix, chunks_db = index_pdf_documents()
+
+# Knowledge Base Status in Sidebar
+with st.sidebar.expander("📚 Knowledge Base Status", expanded=True):
+    if chunks_db:
+        sources = sorted(list(set(c["source"].split(" (")[0] for c in chunks_db)))
+        st.success(f"✅ Indexed {len(chunks_db)} document chunks.")
+        st.markdown("**Active PDFs:**")
+        for src in sources:
+            st.markdown(f"- `{src}`")
+    else:
+        st.warning("⚠️ No PDFs found in `ocr_files/`. Place your OCR PDFs there to enable document search.")
+
 if st.sidebar.button("🗑️ Clear Chat History", use_container_width=True):
     st.session_state.messages = []
     st.rerun()
 
-st.sidebar.divider()
-st.sidebar.subheader("💡 Quick Prompts")
-prompt_suggestions = [
-    "Explain the nucleophilic substitution mechanism of haloalkanes.",
-    "How do I calculate the pH of a weak acid buffer solution?",
-    "What is the official OCR definition for first ionisation energy?",
-    "Summarise transition metal ligand substitution reactions and color changes."
-]
+# Search Helper Function
+def retrieve_relevant_context(query, top_k=3):
+    if embeddings_matrix is None or not chunks_db:
+        return ""
+    
+    # Query embedding
+    query_emb = embedder.encode([query], convert_to_numpy=True, normalize_embeddings=True)
+    
+    # Cosine similarity via dot product
+    scores = np.dot(embeddings_matrix, query_emb.T).squeeze()
+    
+    # Top-K indices
+    top_indices = np.argsort(scores)[::-1][:top_k]
+    
+    retrieved_texts = []
+    for idx in top_indices:
+        chunk = chunks_db[idx]
+        retrieved_texts.append(f"--- [From {chunk['source']}] ---\n{chunk['text']}")
+        
+    return "\n\n".join(retrieved_texts)
 
-for suggestion in prompt_suggestions:
-    if st.sidebar.button(suggestion, use_container_width=True):
-        if "messages" not in st.session_state:
-            st.session_state.messages = []
-        st.session_state.messages.append({"role": "user", "content": suggestion})
-        st.rerun()
+# 5. Main Chat Interface
+st.title("🧪 OCR A Level Chemistry AI Assistant")
+st.caption("Grounded on official OCR A specifications, data sheets, and mark scheme context.")
 
-# 4. Main Chat Interface
-st.title("🧪 OCR A Level Chemistry Assistant")
-st.caption("Ask questions on mechanisms, calculations, OCR mark scheme definitions, or practical skills.")
-
-# Initialize chat history state
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display previous messages
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Process User Input
-if user_input := st.chat_input("Ask a chemistry question (e.g., 'Explain optical isomerism')..."):
+if user_input := st.chat_input("Ask a question about OCR Chemistry..."):
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # Generate Response from Groq
-    with st.chat_message("assistant"):
-        response_placeholder = st.empty()
-        full_response = ""
+    # Search PDFs for relevant context
+    context = retrieve_relevant_context(user_input, top_k=3)
 
-        # Construct full context for the model
-        api_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + [
+    with st.chat_message("assistant"):
+        # Display retrieved context expander for transparency
+        if context:
+            with st.expander("🔍 Retreived Specification & Mark Scheme Context"):
+                st.markdown(context)
+
+        # Construct system message with context
+        augmented_system_prompt = SYSTEM_PROMPT
+        if context:
+            augmented_system_prompt += f"\n\nRELEVANT OCR SPECIFICATION & MARK SCHEME CONTEXT:\n{context}"
+
+        api_messages = [{"role": "system", "content": augmented_system_prompt}] + [
             {"role": msg["role"], "content": msg["content"]} for msg in st.session_state.messages
         ]
+
+        response_placeholder = st.empty()
+        full_response = ""
 
         try:
             stream = client.chat.completions.create(
                 model=selected_model,
                 messages=api_messages,
-                temperature=0.2,
+                temperature=0.1,
                 stream=True
             )
 
