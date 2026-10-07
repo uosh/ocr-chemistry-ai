@@ -22,10 +22,7 @@ st.set_page_config(
 # 2. Text Cleaning Helpers
 # ------------------------------------------------------------------------------
 def clean_pdf_text(text: str) -> str:
-    """Cleans PDF text at the source during indexing, stripping \ce tags
-
-    and converting bracketed equations into proper math blocks.
-    """
+    """Cleans PDF text and formats equations into valid Streamlit display math blocks."""
     if not text:
         return ""
 
@@ -39,18 +36,24 @@ def clean_pdf_text(text: str) -> str:
     # 4. Translate \ce{...} into standard LaTeX \text{...} globally
     text = re.sub(r"\\ce\s*\{([^}]*)\}", r"\\text{\1}", text)
 
-    # 5. Flexible regex to catch square-bracketed equations anywhere in the text
-    # (Matches brackets containing LaTeX commands, arrows, or math symbols, even with trailing spaces)
+    # 5. ROBUST MATH BLOCK FORMATTING:
+    # Convert bracketed \begin{aligned} ... \end{aligned} blocks into clean $$ display blocks
+    text = re.sub(
+        r"\[\s*(\\begin\{aligned\}[\s\S]*?\\end\{aligned\})\s*\]",
+        r"\n$$\n\1\n$$\n",
+        text,
+    )
+
+    # Convert single-line bracketed equations into clean $$ display blocks
     text = re.sub(
         r"\[\s*([^\n\]]*(?:\\text|\\rightarrow|\\to|=|\+|\-|\*)[^\n\]]*)\s*\]",
-        r"$$\1$$",
+        r"\n$$\n\1\n$$\n",
         text,
     )
 
     # 6. Normalize whitespace
     text = re.sub(r"[ \t]+", " ", text)
     return text.strip()
-
 
 def clean_display_text(text: str) -> str:
     """Secondary display wrapper for UI rendering."""
