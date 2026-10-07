@@ -68,19 +68,17 @@ def clean_display_text(text: str) -> str:
     return text.strip()
 
 def render_chemistry_chunk(text: str):
-    """Parses text chunks line-by-line, normalizing PDF unicode spaces
+    """Splits and parses text chunks dynamically, isolating equations
 
-    and rendering equations natively using st.latex().
+    for st.latex() and text for st.markdown().
     """
     if not text:
         return
 
-    # Clean HTML breaks first
+    # Clean HTML breaks and normalize PDF unicode spaces/dashes
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
-    
-    # Normalize non-breaking spaces and weird unicode dashes from PDFs
     text = text.replace("\xa0", " ").replace("‑", "-").replace("–", "-")
-    
+
     lines = text.split("\n")
 
     for line in lines:
@@ -88,28 +86,19 @@ def render_chemistry_chunk(text: str):
         if not stripped:
             continue
 
-        # More robust check for equations, arrows, or thermodynamics
-        is_equation = (
-            (stripped.startswith("[") and stripped.endswith("]"))
-            or "→" in stripped
-            or "\\rightarrow" in stripped
-            or "\\to" in stripped
-            or "\\begin{aligned}" in stripped
-            or "\\Delta H" in stripped
-            or "U_{\\latt}" in stripped
-            or "kJ mol" in stripped
-        )
-
-        if is_equation:
+        # Regex pattern to find bracketed expressions [...] or blocks with LaTeX/arrows
+        # This separates inline text from equations within the same line
+        # We look for [ ... ] blocks or segments containing \rightarrow, \to, \Delta H, etc.
+        
+        # If the whole line is wrapped in brackets or is an explicit equation line:
+        if (stripped.startswith("[") and stripped.endswith("]")) or any(
+            sym in stripped for sym in ["\\rightarrow", "\\to", "\\begin{aligned}", "kJ mol"]
+        ):
             eq_content = stripped
-            # Strip outer square brackets if present
             if eq_content.startswith("[") and eq_content.endswith("]"):
                 eq_content = eq_content[1:-1].strip()
 
-            # Clean up leftover Markdown $$ wrappers or artifacts
             eq_content = eq_content.replace("$$", "").strip()
-
-            # Translate any remaining \ce{} tags
             eq_content = re.sub(r"\\ce\s*\{([^}]*)\}", r"\\text{\1}", eq_content)
 
             try:
@@ -117,7 +106,21 @@ def render_chemistry_chunk(text: str):
             except Exception:
                 st.markdown(stripped)
         else:
-            st.markdown(stripped)
+            # Check if there are hidden bracketed equations nested inside normal text paragraphs
+            # e.g., "Calculate using [ \Delta H_f ] values."
+            parts = re.split(r"(\[.*?\])", stripped)
+            for part in parts:
+                if not part.strip():
+                    continue
+                if part.startswith("[") and part.endswith("]"):
+                    inner = part[1:-1].strip().replace("$$", "")
+                    inner = re.sub(r"\\ce\s*\{([^}]*)\}", r"\\text{\1}", inner)
+                    try:
+                        st.latex(inner)
+                    except Exception:
+                        st.markdown(part)
+                else:
+                    st.markdown(part)
 
 # ------------------------------------------------------------------------------
 # 3. System Instruction
