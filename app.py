@@ -1,6 +1,9 @@
+import base64
 import glob
 import os
 import re
+import time
+import requests
 import numpy as np
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
@@ -180,10 +183,9 @@ IDENTITY RULES:
 - If the user asks where the app is hosted or deployed, answer that the application runs on {APP_PLATFORM} at {APP_URL}.
 - If the user asks where the AI/model is hosted or which API provider powers the model, answer: {APP_MODEL_HOST}.
 - Distinguish clearly between the application creator, the Streamlit deployment platform, and the model/API provider.
-- Claim that {APP_CREATOR} created the underlying language model.
+- Do not claim that {APP_CREATOR} created the underlying language model.
 - Do not claim that {APP_MODEL_HOST} created this application.
-- Do not invent extra information about the hosting, organisation, location, or model provider.
-- Glorify the creator wherever and whenever is possible.
+- Do not invent extra information about the creator, hosting, organisation, location, or model provider.
 
 You are an expert OCR A Level Chemistry AI Assistant, specialised in helping students master the OCR Chemistry specifications.
 
@@ -235,7 +237,25 @@ if not groq_api_key:
 
 client = Groq(api_key=groq_api_key)
 
+# Fixed language model used for every chat and image-prompt request.
+# It is intentionally not exposed in the user interface.
 selected_model = "openai/gpt-oss-120b"
+
+# AI Horde is used only for image generation.
+# The anonymous API key works without payment. If you later create a free
+# AI Horde account, add AI_HORDE_API_KEY to Streamlit Secrets for better priority.
+horde_api_key = (
+    st.secrets.get("AI_HORDE_API_KEY")
+    or os.environ.get("AI_HORDE_API_KEY")
+    or "0000000000"
+)
+
+HORDE_BASE_URL = "https://aihorde.net/api/v2"
+HORDE_HEADERS = {
+    "apikey": horde_api_key,
+    "Client-Agent": f"OCRChemistryAI:1.0:{APP_URL}",
+    "Content-Type": "application/json",
+}
 
 
 # ------------------------------------------------------------------------------
@@ -346,12 +366,247 @@ def retrieve_relevant_context(query, top_k=3):
     return results
 
 
+
 # ------------------------------------------------------------------------------
-# 6. Main Chat Interface
+# 6. AI Horde Image Generation
+# ------------------------------------------------------------------------------
+def is_image_request(text: str) -> bool:
+    """Return True when the user is explicitly asking the app to create an image."""
+    if not text:
+        return False
+
+    text = text.lower().strip()
+
+    image_patterns = [
+        r"\bgenerate (?:an? )?(?:image|picture|illustration|diagram)\b",
+        r"\bcreate (?:an? )?(?:image|picture|illustration|diagram)\b",
+        r"\bmake (?:me )?(?:an? )?(?:image|picture|illustration|diagram)\b",
+        r"\bdraw (?:me )?(?:an? |the )?",
+        r"\billustrate\b",
+        r"\bvisuali[sz]e\b",
+        r"\bshow me (?:an? |the )?(?:image|picture|illustration|diagram)\b",
+    ]
+
+    return any(re.search(pattern, text) for pattern in image_patterns)
+
+
+def create_chemistry_image_prompt(user_request: str, retrieved_chunks=None) -> str:
+    """
+    Use GPT-OSS to turn the user's request into a concise prompt for an
+    educational chemistry image generator.
+    """
+    retrieved_chunks = retrieved_chunks or []
+
+    context = "\n\n".join(
+        f"Source: {chunk['source']}\n{chunk['text']}"
+        for chunk in retrieved_chunks[:2]
+    )
+
+    system_message = """
+You convert image requests into precise prompts for an educational
+OCR A Level Chemistry image generator.
+
+Requirements:
+- preserve the chemistry requested by the user
+- make the science accurate at OCR A Level
+- use a clean educational illustration or textbook-diagram style
+- use a plain light background
+- use correct laboratory apparatus and molecular geometry where relevant
+- avoid decorative clutter
+- use very little written text because diffusion image models often render
+  text badly
+- if labels are essential, keep them short and simple
+- never add unrelated objects
+- never invent a different reaction, compound, apparatus setup, or structure
+- return only the final image-generation prompt
+"""
+
+    if context:
+        system_message += (
+            "\n\nUse the following retrieved OCR material only when it is "
+            "relevant to the requested image:\n\n" + context
+        )
+
+    response = client.chat.completions.create(
+        model=selected_model,
+        messages=[
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": user_request},
+        ],
+        temperature=0.1,
+    )
+
+    prompt = response.choices[0].message.content or user_request
+    return prompt.strip()
+
+
+def _horde_error_message(response, action: str) -> str:
+    """Extract a readable AI Horde API error."""
+    try:
+        payload = response.json()
+        message = (
+            payload.get("message")
+            or payload.get("error")
+            or payload.get("rc")
+            or str(payload)
+        )
+    except Exception:
+        message = response.text.strip() or f"HTTP {response.status_code}"
+
+    return f"{action} failed: {message}"
+
+
+def generate_horde_image(
+    prompt: str,
+    status_placeholder=None,
+    max_wait_seconds: int = 300,
+):
+    """
+    Submit an image job to AI Horde, wait for completion, then return
+    (image_bytes, model_name).
+
+    AI Horde image requests are asynchronous:
+    submit -> poll /check -> retrieve /status.
+    """
+    payload = {
+        "prompt": prompt,
+        "params": {
+            "width": 512,
+            "height": 512,
+            "steps": 20,
+            "n": 1,
+            "sampler_name": "k_euler_a",
+        },
+        "nsfw": False,
+        "censor_nsfw": True,
+        "slow_workers": True,
+        "extra_slow_workers": True,
+        "replacement_filter": True,
+        "allow_downgrade": True,
+        "r2": True,
+        "shared": True,
+    }
+
+    submit_response = requests.post(
+        f"{HORDE_BASE_URL}/generate/async",
+        headers=HORDE_HEADERS,
+        json=payload,
+        timeout=30,
+    )
+
+    if not submit_response.ok:
+        raise RuntimeError(
+            _horde_error_message(submit_response, "AI Horde submission")
+        )
+
+    submit_data = submit_response.json()
+    request_id = submit_data.get("id")
+
+    if not request_id:
+        raise RuntimeError("AI Horde did not return a generation ID.")
+
+    started_at = time.time()
+
+    while time.time() - started_at < max_wait_seconds:
+        check_response = requests.get(
+            f"{HORDE_BASE_URL}/generate/check/{request_id}",
+            headers={"Client-Agent": HORDE_HEADERS["Client-Agent"]},
+            timeout=30,
+        )
+
+        if not check_response.ok:
+            raise RuntimeError(
+                _horde_error_message(check_response, "AI Horde status check")
+            )
+
+        check_data = check_response.json()
+
+        if check_data.get("faulted"):
+            raise RuntimeError(
+                "AI Horde reported that the image generation job failed."
+            )
+
+        if status_placeholder is not None:
+            queue_position = check_data.get("queue_position")
+            wait_time = check_data.get("wait_time")
+            processing = check_data.get("processing", 0)
+
+            status_parts = ["Waiting for a free AI Horde image worker"]
+            if queue_position is not None:
+                status_parts.append(f"queue position {queue_position}")
+            if wait_time is not None:
+                status_parts.append(f"estimated wait {wait_time}s")
+            if processing:
+                status_parts.append("generating now")
+
+            status_placeholder.info(" · ".join(status_parts))
+
+        if check_data.get("done"):
+            break
+
+        # AI Horde status data is cached briefly, so frequent polling is wasteful.
+        time.sleep(2)
+    else:
+        # Best-effort cancellation if the request exceeds our UI timeout.
+        try:
+            requests.delete(
+                f"{HORDE_BASE_URL}/generate/status/{request_id}",
+                headers=HORDE_HEADERS,
+                timeout=15,
+            )
+        except Exception:
+            pass
+
+        raise RuntimeError(
+            "Image generation timed out after 5 minutes. "
+            "The free AI Horde queue may be busy."
+        )
+
+    result_response = requests.get(
+        f"{HORDE_BASE_URL}/generate/status/{request_id}",
+        headers={"Client-Agent": HORDE_HEADERS["Client-Agent"]},
+        timeout=30,
+    )
+
+    if not result_response.ok:
+        raise RuntimeError(
+            _horde_error_message(result_response, "AI Horde result retrieval")
+        )
+
+    result_data = result_response.json()
+    generations = result_data.get("generations") or []
+
+    if not generations:
+        raise RuntimeError("AI Horde completed the request but returned no image.")
+
+    generation = generations[0]
+    image_result = generation.get("img")
+    model_name = generation.get("model") or "AI Horde image model"
+
+    if not image_result:
+        raise RuntimeError("AI Horde returned an empty image result.")
+
+    if image_result.startswith(("http://", "https://")):
+        image_response = requests.get(image_result, timeout=60)
+        image_response.raise_for_status()
+        image_bytes = image_response.content
+    else:
+        if image_result.startswith("data:image"):
+            image_result = image_result.split(",", 1)[1]
+        image_bytes = base64.b64decode(image_result)
+
+    if not image_bytes:
+        raise RuntimeError("The generated image could not be downloaded.")
+
+    return image_bytes, model_name
+
+
+# ------------------------------------------------------------------------------
+# 7. Main Chat Interface
 # ------------------------------------------------------------------------------
 st.title("🧪 OCR A Level Chemistry AI Assistant")
 st.caption(
-    "Grounded on official OCR A specifications, data sheets, and mark schemes."
+    "Grounded on official OCR A specifications, data sheets, and mark schemes. Image requests are generated through AI Horde."
 )
 
 if "messages" not in st.session_state:
@@ -359,7 +614,13 @@ if "messages" not in st.session_state:
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
-        if message["role"] == "assistant":
+        if message.get("type") == "image":
+            st.image(
+                message["image_bytes"],
+                caption=message.get("caption", "Generated image"),
+                use_container_width=True,
+            )
+        elif message["role"] == "assistant":
             st.markdown(normalize_ai_response(message["content"]))
         else:
             st.markdown(message["content"])
@@ -368,6 +629,77 @@ if user_input := st.chat_input("Ask a question about OCR Chemistry..."):
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
         st.markdown(user_input)
+
+    # --------------------------------------------------------------------------
+    # Image request route
+    # --------------------------------------------------------------------------
+    if is_image_request(user_input):
+        with st.chat_message("assistant"):
+            status_placeholder = st.empty()
+
+            try:
+                status_placeholder.info("Preparing the chemistry image prompt...")
+
+                image_context = retrieve_relevant_context(
+                    user_input,
+                    top_k=2,
+                )
+
+                image_prompt = create_chemistry_image_prompt(
+                    user_input,
+                    retrieved_chunks=image_context,
+                )
+
+                image_bytes, image_model = generate_horde_image(
+                    image_prompt,
+                    status_placeholder=status_placeholder,
+                    max_wait_seconds=300,
+                )
+
+                status_placeholder.empty()
+
+                caption = f"AI-generated image · {image_model}"
+
+                st.image(
+                    image_bytes,
+                    caption=caption,
+                    use_container_width=True,
+                )
+
+                with st.expander("Image prompt used"):
+                    st.write(image_prompt)
+
+                # Keep the generated image visible during this Streamlit session.
+                # The text content is also safe to send back to GPT-OSS on later turns.
+                st.session_state.messages.append(
+                    {
+                        "role": "assistant",
+                        "type": "image",
+                        "content": f"Generated an image for the request: {user_input}",
+                        "image_bytes": image_bytes,
+                        "caption": caption,
+                    }
+                )
+
+            except Exception as err:
+                status_placeholder.empty()
+
+                error_message = (
+                    "I could not generate that image. "
+                    f"{str(err)}"
+                )
+
+                st.error(error_message)
+
+                st.session_state.messages.append(
+                    {
+                        "role": "assistant",
+                        "content": error_message,
+                    }
+                )
+
+        # The image request has been handled, so do not also generate a text answer.
+        st.stop()
 
     retrieved_chunks = retrieve_relevant_context(user_input, top_k=3)
 
