@@ -34,7 +34,7 @@ if not groq_api_key:
 
 # Initialize OpenAI client with Groq base URL
 client = OpenAI(
-    base_url="https://api.groq.com/openai/v1",
+    base_url="https://api.groq.com/openai/v1",  # <-- MUST BE INCLUDED
     api_key=groq_api_key
 )
 
