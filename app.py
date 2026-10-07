@@ -2,6 +2,13 @@ import os
 import streamlit as st
 from groq import Groq
 
+
+# Temporary File Inspector in Sidebar
+with st.sidebar.expander("📁 View App Files"):
+    files = os.listdir(".")
+    st.write("Files in root directory:")
+    st.code("\n".join(files))
+
 # 1. Streamlit Page Configuration
 st.set_page_config(
     page_title="OCR Chemistry AI",
