@@ -22,7 +22,6 @@ Key Guidelines:
 
 # 3. Sidebar Configuration
 st.sidebar.title("🧪 OCR Chemistry AI")
-st.sidebar.markdown("Powered by **Llama 3.3 70B** via Groq")
 
 # Retrieve API key from secrets or environment variables
 groq_api_key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
@@ -32,8 +31,20 @@ if not groq_api_key:
     st.info("Add `GROQ_API_KEY = \"gsk_...\"` in Streamlit Secrets (`.streamlit/secrets.toml`).")
     st.stop()
 
-# Initialize official Groq client directly
+# Initialize Groq client
 client = Groq(api_key=groq_api_key)
+
+# Model selector for active Groq endpoints
+selected_model = st.sidebar.selectbox(
+    "Active Groq Model",
+    options=[
+        "openai/gpt-oss-120b",
+        "qwen/qwen3.6-27b",
+        "openai/gpt-oss-20b",
+        "llama-3.1-8b-instant"
+    ],
+    index=0
+)
 
 # Clear Conversation Button
 if st.sidebar.button("🗑️ Clear Chat History", use_container_width=True):
@@ -87,7 +98,7 @@ if user_input := st.chat_input("Ask a chemistry question (e.g., 'Explain optical
 
         try:
             stream = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model=selected_model,
                 messages=api_messages,
                 temperature=0.2,
                 stream=True
