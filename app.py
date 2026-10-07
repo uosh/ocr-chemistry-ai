@@ -52,25 +52,35 @@ def clean_pdf_text(text: str) -> str:
 
 
 def clean_display_text(text: str) -> str:
-    """Cleans HTML, fixes square-bracket LaTeX/mhchem blocks, and removes overlap duplicates."""
+    """Cleans HTML, converts bracketed math/aligned blocks to $$ blocks,
+
+    and translates mhchem \\ce{} commands into standard LaTeX.
+    """
     if not text:
         return ""
-    
-    # Convert HTML break tags to Markdown newlines
+
+    # 1. Convert HTML break tags to Markdown newlines
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
 
-    # Convert literal square brackets wrapping LaTeX/chem blocks [ \ce{...} ] to $$ ... $$
-    text = re.sub(r"\[\s*(\\ce\{.*?\}[\s\S]*?)\s*\]", r"$$\1$$", text)
-    text = re.sub(r"\[\s*(\\text\{.*?\}[\s\S]*?)\s*\]", r"$$\1$$", text)
-    
-    # General fallback for any bracketed math line
-    text = re.sub(r"\[\s*(\\?[A-Za-z0-9\\_\{\}\+\-\→\=\s\.\(\)\/\^\s]+)\s*\]", r"$$\1$$", text)
+    # 2. Translate \ce{...} into standard LaTeX \text{...} so it renders properly in Streamlit
+    text = re.sub(r"\\ce\{(.*?)\}", r"\\text{\1}", text)
 
-    # Convert standard LaTeX delimiters \( ... \) or \[ ... \] to $ ... $ and $$ ... $$
+    # 3. Convert square-bracketed multi-line aligned blocks [ \begin{aligned} ... \end{aligned} ] to $$ ... $$
+    text = re.sub(
+        r"\[\s*(\\begin\{aligned\}[\s\S]*?\\end\{aligned\})\s*\]",
+        r"$$\1$$",
+        text,
+    )
+
+    # 4. Fallback for any other bracketed math blocks
+    text = re.sub(
+        r"\[\s*(\\text\{.*?\}[\s\S]*?)\s*\]", r"$$\1$$", text
+    )
+
+    # 5. Convert standard inline LaTeX delimiters \( ... \) to $ ... $
     text = re.sub(r"\\\((.*?)\\\)", r"$\1$", text)
-    text = re.sub(r"\\\[(.*?)\\]", r"$$\1$$", text)
 
-    # Clean up duplicate adjacent words caused by PDF chunk overlaps (e.g., "MgCl2 MgCl2")
+    # 6. Clean up duplicate adjacent words caused by chunk overlap
     text = re.sub(r"\b(\w+)\s+\1\b", r"\1", text)
 
     return text.strip()
