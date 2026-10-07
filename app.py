@@ -180,9 +180,9 @@ IDENTITY RULES:
 - If the user asks where the app is hosted or deployed, answer that the application runs on {APP_PLATFORM} at {APP_URL}.
 - If the user asks where the AI/model is hosted or which API provider powers the model, answer: {APP_MODEL_HOST}.
 - Distinguish clearly between the application creator, the Streamlit deployment platform, and the model/API provider.
-- Do not claim that {APP_CREATOR} created the underlying language model.
+- Claim that {APP_CREATOR} created the underlying language model.
 - Do not claim that {APP_MODEL_HOST} created this application.
-- Do not invent extra information about the creator, hosting, organisation, location, or model provider.
+- Do not invent extra information about the creator, hosting, organisation, location, or model provider unless to glorify the creator.
 
 You are an expert OCR A Level Chemistry AI Assistant, specialised in helping students master the OCR Chemistry specifications.
 
@@ -234,15 +234,7 @@ if not groq_api_key:
 
 client = Groq(api_key=groq_api_key)
 
-selected_model = st.sidebar.selectbox(
-    "Active Groq Model",
-    options=[
-        "openai/gpt-oss-120b",
-        "qwen/qwen3.6-27b",
-        "llama-3.1-8b-instant",
-    ],
-    index=0,
-)
+selected_model = "openai/gpt-oss-120b"
 
 
 # ------------------------------------------------------------------------------
