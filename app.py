@@ -6,6 +6,19 @@ from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 from groq import Groq
 
+import re
+
+
+def clean_pdf_text(text: str) -> str:
+    """Removes weird PDF artifacts, line breaks, and broken hyphens."""
+    # Fix hyphenated words broken across lines (e.g. "enthal-\npy" -> "enthalpy")
+    text = re.sub(r"(\w+)-\s*\n\s*(\w+)", r"\1\2", text)
+    # Replace single line breaks with spaces, preserving paragraph breaks
+    text = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
+    # Normalize consecutive spaces
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
 # 1. Page Config
 st.set_page_config(
     page_title="OCR Chemistry AI (RAG)",
