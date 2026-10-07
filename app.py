@@ -22,15 +22,32 @@ st.set_page_config(
 # 2. Text Cleaning Helpers
 # ------------------------------------------------------------------------------
 def clean_pdf_text(text: str) -> str:
-    """Removes line-break hyphens and normalizes whitespace in raw PDF text."""
+    """Universally repairs PDF column-merging artifacts and flattened tables
+
+    for any chemistry topic without hardcoding specific keywords.
+    """
     if not text:
         return ""
-    # Fix hyphenated words broken across lines (e.g. "enthal-\npy" -> "enthalpy")
+
+    # 1. Fix hyphenated words broken across lines (e.g. "enthal-\npy" -> "enthalpy")
     text = re.sub(r"(\w+)-\s*\n\s*(\w+)", r"\1\2", text)
-    # Replace single line breaks with spaces
-    text = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
-    # Normalize consecutive spaces and tabs
+
+    # 2. Fix camelCase words smashed together by column lines (e.g. "typeDefinition" -> "type Definition")
+    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
+
+    # 3. Insert space between letters and Greek letters/symbols (e.g. "questionΔH" -> "question ΔH")
+    text = re.sub(r"([a-zA-Z])([ΔΣΩθπ])", r"\1 \2", text)
+
+    # 4. Insert space between closing punctuation/parentheses and starting text (e.g. "values.ΔH" -> "values. ΔH")
+    text = re.sub(r"([\.|\)])([A-ZΔ])", r"\1 \2", text)
+
+    # 5. Insert line breaks before common structural patterns (numbers, bullet indicators, or capital letters following periods)
+    text = re.sub(r"\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*:\s*)", r"\n\n\1", text)
+
+    # 6. Normalize multiple spaces and clean up
     text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
     return text.strip()
 
 
