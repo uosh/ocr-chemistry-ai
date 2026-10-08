@@ -1,7 +1,8 @@
 import base64
 import glob
 import html
-import hmac
+import uuid
+from datetime import datetime, timezone
 import json
 import os
 import re
@@ -13,6 +14,7 @@ from sentence_transformers import SentenceTransformer
 import streamlit as st
 import streamlit.components.v1 as components
 from groq import Groq
+from supabase import create_client
 
 # ------------------------------------------------------------------------------
 # 1. Page Configuration
@@ -348,83 +350,289 @@ HORDE_HEADERS = {
 }
 
 
-def _read_int_setting(name: str, default: int, minimum: int = 1) -> int:
-    """Read an integer from Streamlit Secrets or the environment safely."""
-    raw_value = st.secrets.get(name) or os.environ.get(name)
-
-    if raw_value is None:
-        return default
-
-    try:
-        return max(minimum, int(raw_value))
-    except (TypeError, ValueError):
-        return default
-
-
-# Tester limits. You can override these in Streamlit Secrets without editing code.
-MAX_REQUESTS_PER_SESSION = _read_int_setting(
-    "MAX_REQUESTS_PER_SESSION",
-    75,
+# ------------------------------------------------------------------------------
+# Account authentication and durable conversation storage
+# ------------------------------------------------------------------------------
+# Never use a service_role or secret key in this user-facing database client.
+SUPABASE_URL = st.secrets.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = (
+    st.secrets.get("SUPABASE_ANON_KEY")
+    or os.environ.get("SUPABASE_ANON_KEY")
 )
-MAX_AI_IMAGES_PER_SESSION = _read_int_setting(
-    "MAX_AI_IMAGES_PER_SESSION",
-    5,
-)
+ADMIN_USER_ID = (
+    st.secrets.get("ADMIN_USER_ID")
+    or os.environ.get("ADMIN_USER_ID")
+    or ""
+).strip()
 
-# Optional admin authentication. The password is NEVER placed in the model
-# prompt or source code. Configure ADMIN_PASSWORD in Streamlit Secrets.
-admin_password = (
-    st.secrets.get("ADMIN_PASSWORD")
-    or os.environ.get("ADMIN_PASSWORD")
-)
+if not SUPABASE_URL or not SUPABASE_KEY:
+    st.error("Account database is not configured. Set SUPABASE_URL and SUPABASE_ANON_KEY in Streamlit Secrets.")
+    st.stop()
 
-if "admin_authenticated" not in st.session_state:
-    st.session_state.admin_authenticated = False
 
-if "request_count" not in st.session_state:
-    st.session_state.request_count = 0
+def new_user_client():
+    """Create an independent, user-scoped Supabase client for this session."""
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
 
-if "ai_image_count" not in st.session_state:
-    st.session_state.ai_image_count = 0
 
-if admin_password:
-    with st.sidebar.expander("🔐 Admin"):
-        if st.session_state.admin_authenticated:
-            st.success(f"Signed in as {APP_CREATOR}")
+def reset_user_session():
+    for key in [
+        "db_client", "user_id", "user_email", "current_chat_id",
+        "messages", "chat_image_cache", "delete_chat_confirm",
+    ]:
+        st.session_state.pop(key, None)
 
-            if st.button("Sign out", use_container_width=True):
-                st.session_state.admin_authenticated = False
-                st.rerun()
-        else:
-            entered_password = st.text_input(
-                "Admin password",
-                type="password",
-                key="admin_password_input",
-            )
 
-            if st.button("Sign in", use_container_width=True):
-                if hmac.compare_digest(
-                    entered_password,
-                    str(admin_password),
-                ):
-                    st.session_state.admin_authenticated = True
-                    st.rerun()
+def show_auth_screen():
+    st.title("🧪 OCR Chemistry AI")
+    st.caption("Create an account to save your private chemistry conversations.")
+    sign_in_tab, register_tab = st.tabs(["Sign in", "Create account"])
+
+    with sign_in_tab:
+        with st.form("signin_form"):
+            email = st.text_input("Email address", key="sign_in_email")
+            password = st.text_input("Password", type="password", key="sign_in_password")
+            submitted = st.form_submit_button("Sign in", use_container_width=True)
+        if submitted:
+            try:
+                candidate = new_user_client()
+                reply = candidate.auth.sign_in_with_password({
+                    "email": email.strip(), "password": password,
+                })
+                if reply.session is None or reply.user is None:
+                    st.error("Sign-in did not complete. Check your email verification.")
                 else:
-                    st.error("Incorrect password.")
+                    # Trust the identity returned by the auth provider, not form input.
+                    verified = candidate.auth.get_user()
+                    if not verified.user:
+                        raise RuntimeError("Authentication could not be verified")
+                    reset_user_session()
+                    st.session_state.db_client = candidate
+                    st.session_state.user_id = str(verified.user.id)
+                    st.session_state.user_email = verified.user.email or email.strip()
+                    st.session_state.current_chat_id = None
+                    st.session_state.messages = []
+                    st.rerun()
+            except Exception:
+                st.error("Could not sign in. Check your credentials and confirm your email.")
+
+    with register_tab:
+        with st.form("signup_form"):
+            new_email = st.text_input("Email address", key="sign_up_email")
+            new_password = st.text_input("Password (at least 8 characters)", type="password", key="sign_up_password")
+            confirm_password = st.text_input("Confirm password", type="password", key="sign_up_confirm")
+            register = st.form_submit_button("Create account", use_container_width=True)
+        if register:
+            if len(new_password) < 8:
+                st.error("Use a password of at least eight characters.")
+            elif new_password != confirm_password:
+                st.error("Passwords do not match.")
+            else:
+                try:
+                    candidate = new_user_client()
+                    result = candidate.auth.sign_up({
+                        "email": new_email.strip(),
+                        "password": new_password,
+                    })
+                    if result.session is None:
+                        st.success("If the registration can be completed, check your inbox for an email verification link, then return to sign in.")
+                    else:
+                        # Projects may disable email confirmation. Verify auth identity.
+                        verified = candidate.auth.get_user()
+                        if verified.user:
+                            reset_user_session()
+                            st.session_state.db_client = candidate
+                            st.session_state.user_id = str(verified.user.id)
+                            st.session_state.user_email = verified.user.email or new_email.strip()
+                            st.session_state.current_chat_id = None
+                            st.session_state.messages = []
+                            st.rerun()
+                        else:
+                            st.success("Account created. Please sign in.")
+                except Exception:
+                    # Do not reveal whether an email already has an account.
+                    st.info("Registration could not be completed. Check the email address and password, then try again.")
+
+    st.caption(
+        "Conversations are saved to your account and processed by external AI providers. "
+        "Do not submit sensitive personal information."
+    )
 
 
+if "db_client" not in st.session_state:
+    show_auth_screen()
+    st.stop()
 
-# Ordinary testers only see their own session usage.
-if not st.session_state.admin_authenticated:
-    with st.sidebar.expander("🧪 Testing limits"):
-        st.caption(
-            f"Questions used this session: "
-            f"{st.session_state.request_count}/{MAX_REQUESTS_PER_SESSION}"
+# The Supabase client belongs exclusively to this Streamlit session.
+db = st.session_state.db_client
+try:
+    # This can refresh an expired access token, using the client's stored session.
+    active_session = db.auth.get_session()
+    if active_session is None:
+        raise RuntimeError("Expired sign-in session")
+    verified_identity = db.auth.get_user()
+    if not verified_identity.user:
+        raise RuntimeError("User could not be verified")
+    verified_user_id = str(verified_identity.user.id)
+    if verified_user_id != st.session_state.user_id:
+        raise RuntimeError("Session identity mismatch")
+except Exception:
+    reset_user_session()
+    st.warning("Your sign-in session expired. Please sign in again.")
+    st.rerun()
+
+is_admin = bool(ADMIN_USER_ID and verified_user_id == ADMIN_USER_ID)
+st.session_state.admin_authenticated = is_admin
+
+st.sidebar.caption(f"Signed in: {st.session_state.user_email}")
+if st.sidebar.button("Sign out", use_container_width=True):
+    try:
+        db.auth.sign_out()
+    finally:
+        reset_user_session()
+        st.rerun()
+
+
+# All database queries use the authenticated user client; database RLS provides
+# enforcement independent of the sidebar, browser and Streamlit session state.
+def list_my_conversations():
+    response = (
+        db.table("chat_conversations")
+        .select("id,title,created_at,updated_at")
+        .eq("user_id", verified_user_id)
+        .order("updated_at", desc=True)
+        .limit(60)
+        .execute()
+    )
+    return response.data or []
+
+
+def list_my_messages(conversation_id):
+    """Read the full log in pages (Supabase defaults may cap one response)."""
+    page_size = 500
+    offset = 0
+    rows = []
+    while True:
+        response = (
+            db.table("chat_messages")
+            .select("id,role,kind,content,caption,diagram_spec,image_path,created_at")
+            .eq("conversation_id", conversation_id)
+            .eq("user_id", verified_user_id)
+            .order("created_at")
+            .order("id")
+            .range(offset, offset + page_size - 1)
+            .execute()
         )
-        st.caption(
-            f"AI images used this session: "
-            f"{st.session_state.ai_image_count}/{MAX_AI_IMAGES_PER_SESSION}"
-        )
+        page = response.data or []
+        rows.extend(page)
+        if len(page) < page_size:
+            return rows
+        offset += page_size
+
+
+def create_conversation(first_question):
+    title = " ".join(first_question.split())[:80] or "Chemistry chat"
+    response = db.table("chat_conversations").insert({
+        "title": title,
+    }).execute()
+    if not response.data:
+        raise RuntimeError("Conversation could not be created")
+    return str(response.data[0]["id"])
+
+
+def save_message(role, content, kind="text", caption=None, diagram_spec=None, image_path=None):
+    conversation_id = st.session_state.current_chat_id
+    if not conversation_id:
+        raise RuntimeError("No conversation is selected")
+    response = db.table("chat_messages").insert({
+        "conversation_id": conversation_id,
+        "role": role,
+        "content": content or "",
+        "kind": kind,
+        "caption": caption,
+        "diagram_spec": diagram_spec,
+        "image_path": image_path,
+    }).execute()
+    if not response.data:
+        raise RuntimeError("Message was not saved")
+    # Keep newest conversations at the top.
+    db.table("chat_conversations").update({
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }).eq("id", conversation_id).eq("user_id", verified_user_id).execute()
+    return response.data[0]
+
+
+def upload_private_image(image_bytes):
+    conversation_id = st.session_state.current_chat_id
+    # The first path segment is the verified user ID. The storage bucket's RLS
+    # checks this prefix for each object operation.
+    if image_bytes.startswith(b"\x89PNG"):
+        ext, mime = "png", "image/png"
+    elif image_bytes.startswith(b"\xff\xd8"):
+        ext, mime = "jpg", "image/jpeg"
+    elif image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
+        ext, mime = "webp", "image/webp"
+    else:
+        raise ValueError("AI Horde returned an unsupported image format")
+    object_path = f"{verified_user_id}/{conversation_id}/{uuid.uuid4().hex}.{ext}"
+    db.storage.from_("chat-images").upload(
+        path=object_path,
+        file=image_bytes,
+        file_options={"content-type": mime, "upsert": "false"},
+    )
+    return object_path
+
+
+def get_private_image(image_path):
+    if not image_path or not image_path.startswith(verified_user_id + "/"):
+        raise ValueError("Invalid image path")
+    cache = st.session_state.setdefault("chat_image_cache", {})
+    if image_path not in cache:
+        cache[image_path] = db.storage.from_("chat-images").download(image_path)
+    return cache[image_path]
+
+
+def remove_current_conversation(conversation_id):
+    rows = list_my_messages(conversation_id)
+    image_paths = [r["image_path"] for r in rows if r.get("image_path")]
+    db.table("chat_conversations").delete().eq("id", conversation_id).eq(
+        "user_id", verified_user_id
+    ).execute()
+    if image_paths:
+        # Private image file cleanup is best-effort; report failure to the user.
+        db.storage.from_("chat-images").remove(image_paths)
+    for p in image_paths:
+        st.session_state.setdefault("chat_image_cache", {}).pop(p, None)
+
+
+if "current_chat_id" not in st.session_state:
+    st.session_state.current_chat_id = None
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+st.sidebar.divider()
+st.sidebar.subheader("Your conversations")
+if st.sidebar.button("＋ New chat", use_container_width=True):
+    st.session_state.current_chat_id = None
+    st.session_state.messages = []
+    st.rerun()
+
+try:
+    my_conversations = list_my_conversations()
+except Exception:
+    st.error("Could not read conversation history. Check the database setup and row-level security policies.")
+    st.stop()
+
+for conversation in my_conversations:
+    cid = str(conversation["id"])
+    title = str(conversation.get("title") or "Chemistry chat")
+    if st.sidebar.button(title[:45], key=f"open_{cid}", use_container_width=True):
+        st.session_state.current_chat_id = cid
+        st.session_state.messages = []
+        st.rerun()
+
+if is_admin:
+    st.sidebar.caption("Administrator account")
 
 
 # ------------------------------------------------------------------------------
@@ -954,19 +1162,6 @@ if st.session_state.get("admin_authenticated"):
     ):
         st.cache_data.clear()
         st.rerun()
-
-    st.sidebar.caption(
-        "Admin sessions bypass tester request and image limits."
-    )
-
-if st.sidebar.button(
-    "🗑️ Clear Chat History",
-    use_container_width=True,
-):
-    # Only clears this browser session's conversation.
-    # Testing usage counters deliberately remain unchanged.
-    st.session_state.messages = []
-    st.rerun()
 
 
 def _query_metadata_preferences(query: str):
@@ -1595,7 +1790,7 @@ def render_chemistry_svg(spec: dict) -> str:
     Convert the safe structured diagram spec into SVG.
     Text is escaped, and the model never controls raw HTML/SVG.
     """
-    title = html.escape(str(spec.get("title", "Chemistry diagram")))
+    title = str(spec.get("title", "Chemistry diagram"))
     elements = spec.get("elements", [])
 
     parts = [
@@ -2124,8 +2319,69 @@ st.caption(
     "Grounded on OCR A specifications, mark schemes, data sheets and skills material. Chemistry diagrams are rendered as clean vectors."
 )
 
-if "messages" not in st.session_state:
+# Load the currently selected conversation from the database on every rerun.
+# Avoid reusing one user's in-memory history for a different conversation.
+if st.session_state.current_chat_id:
+    # The selected chat MUST also appear in this authenticated user's list.
+    owned_ids = {str(c["id"]) for c in my_conversations}
+    if st.session_state.current_chat_id not in owned_ids:
+        st.session_state.current_chat_id = None
+        st.session_state.messages = []
+    else:
+        try:
+            loaded = list_my_messages(st.session_state.current_chat_id)
+            rendered_history = []
+            for saved in loaded:
+                kind = saved.get("kind") or "text"
+                message = {
+                    "role": saved["role"],
+                    "content": saved.get("content") or "",
+                }
+                if kind == "diagram" and isinstance(saved.get("diagram_spec"), dict):
+                    message["type"] = "diagram"
+                    message["svg"] = render_chemistry_svg(saved["diagram_spec"])
+                    message["caption"] = saved.get("caption") or ""
+                elif kind == "image" and saved.get("image_path"):
+                    message["type"] = "image"
+                    message["caption"] = saved.get("caption") or "Generated image"
+                    try:
+                        message["image_bytes"] = get_private_image(saved["image_path"])
+                    except Exception:
+                        message["image_bytes"] = None
+                rendered_history.append(message)
+            st.session_state.messages = rendered_history
+        except Exception:
+            st.error("Could not load this conversation. Please try again.")
+            st.stop()
+else:
     st.session_state.messages = []
+
+if st.session_state.current_chat_id:
+    with st.sidebar.expander("Manage selected chat"):
+        export_rows = list_my_messages(st.session_state.current_chat_id)
+        export_data = [
+            {key: row.get(key) for key in (
+                "role", "kind", "content", "caption", "diagram_spec", "created_at"
+            )} for row in export_rows
+        ]
+        st.download_button(
+            "Export chat as JSON",
+            data=json.dumps(export_data, ensure_ascii=False, indent=2),
+            file_name="chemistry-chat.json",
+            mime="application/json",
+            use_container_width=True,
+            help="Exports text and diagram data. Generated image files are not included.",
+        )
+        confirm_deletion = st.checkbox("I want to delete this chat", key="delete_chat_confirm")
+        if st.button("Delete selected chat", disabled=not confirm_deletion, use_container_width=True):
+            try:
+                remove_current_conversation(st.session_state.current_chat_id)
+                st.session_state.current_chat_id = None
+                st.session_state.messages = []
+                st.session_state.pop("delete_chat_confirm", None)
+                st.rerun()
+            except Exception:
+                st.error("Chat deletion was incomplete. Try again or contact support.")
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
@@ -2135,33 +2391,27 @@ for message in st.session_state.messages:
             if caption:
                 st.caption(caption)
         elif message.get("type") == "image":
-            st.image(
-                message["image_bytes"],
-                caption=message.get("caption", "Generated image"),
-                use_container_width=True,
-            )
+            if message.get("image_bytes"):
+                st.image(
+                    message["image_bytes"],
+                    caption=message.get("caption", "Generated image"),
+                    use_container_width=True,
+                )
+            else:
+                st.warning("This saved image could not be loaded.")
         elif message["role"] == "assistant":
             st.markdown(normalize_ai_response(message["content"]))
         else:
             st.markdown(message["content"])
 
 if user_input := st.chat_input("Ask a question about OCR Chemistry..."):
-    is_admin = st.session_state.get("admin_authenticated", False)
-
-    if (
-        not is_admin
-        and st.session_state.request_count >= MAX_REQUESTS_PER_SESSION
-    ):
-        st.error(
-            "You have reached the testing limit for this session. "
-            "Start a new testing session later or ask the app owner for access."
-        )
+    try:
+        if not st.session_state.current_chat_id:
+            st.session_state.current_chat_id = create_conversation(user_input)
+        save_message("user", user_input)
+    except Exception:
+        st.error("Your message could not be saved, so the AI request was not sent. Please retry.")
         st.stop()
-
-    # Count one submitted user turn. Admin sessions are not rate-limited.
-    if not is_admin:
-        st.session_state.request_count += 1
-
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
         st.markdown(user_input)
@@ -2198,14 +2448,18 @@ if user_input := st.chat_input("Ask a question about OCR Chemistry..."):
                 with st.expander("Diagram specification"):
                     st.json(diagram_spec)
 
+                diagram_content = f"Generated a chemistry diagram for: {user_input}"
+                save_message(
+                    "assistant",
+                    diagram_content,
+                    kind="diagram",
+                    caption=diagram_caption,
+                    diagram_spec=diagram_spec,
+                )
                 st.session_state.messages.append(
                     {
-                        "role": "assistant",
-                        "type": "diagram",
-                        "content": (
-                            f"Generated a chemistry diagram for: {user_input}"
-                        ),
-                        "svg": svg,
+                        "role": "assistant", "type": "diagram",
+                        "content": diagram_content, "svg": svg,
                         "caption": diagram_caption,
                     }
                 )
@@ -2219,11 +2473,13 @@ if user_input := st.chat_input("Ask a question about OCR Chemistry..."):
                 )
 
                 st.error(error_message)
-
+                try:
+                    save_message("assistant", error_message)
+                except Exception:
+                    st.warning("The error message could not be saved.")
                 st.session_state.messages.append(
                     {
-                        "role": "assistant",
-                        "content": error_message,
+                        "role": "assistant", "content": error_message,
                     }
                 )
 
@@ -2233,28 +2489,6 @@ if user_input := st.chat_input("Ask a question about OCR Chemistry..."):
     # AI Horde image request route
     # --------------------------------------------------------------------------
     if is_image_request(user_input):
-        if (
-            not st.session_state.get("admin_authenticated", False)
-            and st.session_state.ai_image_count >= MAX_AI_IMAGES_PER_SESSION
-        ):
-            with st.chat_message("assistant"):
-                message = (
-                    "You have reached the AI image-generation limit "
-                    "for this testing session. Chemistry diagrams still work "
-                    "because they use the built-in vector renderer."
-                )
-                st.warning(message)
-                st.session_state.messages.append(
-                    {
-                        "role": "assistant",
-                        "content": message,
-                    }
-                )
-            st.stop()
-
-        if not st.session_state.get("admin_authenticated", False):
-            st.session_state.ai_image_count += 1
-
         with st.chat_message("assistant"):
             status_placeholder = st.empty()
 
@@ -2292,12 +2526,28 @@ if user_input := st.chat_input("Ask a question about OCR Chemistry..."):
 
                 # Keep the generated image visible during this Streamlit session.
                 # The text content is also safe to send back to GPT-OSS on later turns.
+                image_content = f"Generated an image for the request: {user_input}"
+                image_path = upload_private_image(image_bytes)
+                try:
+                    save_message(
+                        "assistant",
+                        image_content,
+                        kind="image",
+                        caption=caption,
+                        image_path=image_path,
+                    )
+                except Exception:
+                    # Best-effort cleanup if database insertion failed.
+                    try:
+                        db.storage.from_("chat-images").remove([image_path])
+                    except Exception:
+                        pass
+                    raise
+                st.session_state.setdefault("chat_image_cache", {})[image_path] = image_bytes
                 st.session_state.messages.append(
                     {
-                        "role": "assistant",
-                        "type": "image",
-                        "content": f"Generated an image for the request: {user_input}",
-                        "image_bytes": image_bytes,
+                        "role": "assistant", "type": "image",
+                        "content": image_content, "image_bytes": image_bytes,
                         "caption": caption,
                     }
                 )
@@ -2311,11 +2561,13 @@ if user_input := st.chat_input("Ask a question about OCR Chemistry..."):
                 )
 
                 st.error(error_message)
-
+                try:
+                    save_message("assistant", error_message)
+                except Exception:
+                    st.warning("The error message could not be saved.")
                 st.session_state.messages.append(
                     {
-                        "role": "assistant",
-                        "content": error_message,
+                        "role": "assistant", "content": error_message,
                     }
                 )
 
@@ -2403,6 +2655,10 @@ if user_input := st.chat_input("Ask a question about OCR Chemistry..."):
             response_placeholder.markdown(formatted_response)
 
             # Store the raw model output. Normalization is a display concern only.
+            try:
+                save_message("assistant", full_response)
+            except Exception:
+                st.warning("The AI answered, but its response could not be saved to your account.")
             st.session_state.messages.append(
                 {"role": "assistant", "content": full_response}
             )
