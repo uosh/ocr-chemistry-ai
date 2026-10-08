@@ -499,7 +499,7 @@ def show_auth_screen():
             code_email = st.text_input("Account email", key="recovery_code_email")
             recovery_code = st.text_input("Recovery code from email", key="recovery_code")
             recovery_new_password = st.text_input(
-                "New password (12 characters minimum)",
+                "New password (8 characters minimum)",
                 type="password", key="recovery_new_password"
             )
             recovery_confirm = st.text_input(
@@ -509,8 +509,8 @@ def show_auth_screen():
                 "Set new password", use_container_width=True
             )
         if complete_recovery:
-            if len(recovery_new_password) < 12:
-                st.error("Use a password with at least 12 characters.")
+            if len(recovery_new_password) < 8:
+                st.error("Use a password with at least 8 characters.")
             elif recovery_new_password != recovery_confirm:
                 st.error("New passwords do not match.")
             elif not code_email.strip() or not recovery_code.strip():
