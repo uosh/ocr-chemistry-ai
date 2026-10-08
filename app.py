@@ -873,12 +873,12 @@ if st.session_state.account_settings_open:
         st.caption("Use the Reset password tab on the sign-in screen if you forget your password.")
         with st.form("change_password_form"):
             current_password = st.text_input("Current password", type="password")
-            new_password = st.text_input("New password (12+ characters)", type="password")
+            new_password = st.text_input("New password", type="password")
             new_confirm = st.text_input("Confirm new password", type="password")
             change_password = st.form_submit_button("Update password")
         if change_password:
-            if len(new_password) < 12:
-                st.error("Use at least 12 characters.")
+            if len(new_password) < 9:
+                st.error("Use at least 9 characters.")
             elif new_password != new_confirm:
                 st.error("New passwords do not match.")
             else:
