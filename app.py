@@ -1,4 +1,6 @@
 import base64
+import io
+import zipfile
 import glob
 import html
 import uuid
@@ -379,14 +381,21 @@ def reset_user_session():
     for key in [
         "db_client", "user_id", "user_email", "current_chat_id",
         "messages", "chat_image_cache", "delete_chat_confirm",
+        "account_settings_open", "account_export_zip", "account_delete_confirm",
+        "account_delete_email", "account_delete_password",
+        "admin_authenticated",
     ]:
         st.session_state.pop(key, None)
 
 
 def show_auth_screen():
     st.title("🧪 OCR Chemistry AI")
+    if st.session_state.pop("account_deleted_notice", False):
+        st.success("Your account and saved Supabase data were deleted.")
     st.caption("Create an account to save your private chemistry conversations.")
-    sign_in_tab, register_tab = st.tabs(["Sign in", "Create account"])
+    sign_in_tab, register_tab, recovery_tab = st.tabs(
+        ["Sign in", "Create account", "Reset password"]
+    )
 
     with sign_in_tab:
         with st.form("signin_form"):
@@ -419,12 +428,18 @@ def show_auth_screen():
     with register_tab:
         with st.form("signup_form"):
             new_email = st.text_input("Email address", key="sign_up_email")
-            new_password = st.text_input("Password (at least 8 characters)", type="password", key="sign_up_password")
+            new_password = st.text_input("Password (at least 12 characters)", type="password", key="sign_up_password")
             confirm_password = st.text_input("Confirm password", type="password", key="sign_up_confirm")
+            privacy_acknowledged = st.checkbox(
+                "I understand that chats are saved in Supabase and sent to Groq "
+                "to generate responses. Optional image requests use AI Horde."
+            )
             register = st.form_submit_button("Create account", use_container_width=True)
         if register:
-            if len(new_password) < 8:
-                st.error("Use a password of at least eight characters.")
+            if not privacy_acknowledged:
+                st.error("Read and acknowledge how your data is processed.")
+            elif len(new_password) < 12:
+                st.error("Use a password of at least twelve characters.")
             elif new_password != confirm_password:
                 st.error("Passwords do not match.")
             else:
@@ -453,8 +468,72 @@ def show_auth_screen():
                     # Do not reveal whether an email already has an account.
                     st.info("Registration could not be completed. Check the email address and password, then try again.")
 
+    with recovery_tab:
+        st.markdown("**Forgot your password?** Request a one-time recovery code by email.")
+        st.caption(
+            "Your Supabase Reset password email template must contain "
+            "the code variable `{{ .Token }}`. A normal reset link is not "
+            "processed by this Streamlit-only implementation."
+        )
+        with st.form("recovery_request_form"):
+            recovery_email = st.text_input("Account email", key="recovery_email")
+            request_recovery = st.form_submit_button(
+                "Email me a recovery code", use_container_width=True
+            )
+        if request_recovery:
+            if "@" not in recovery_email or not recovery_email.strip():
+                st.error("Enter a valid email address.")
+            else:
+                try:
+                    candidate = new_user_client()
+                    candidate.auth.reset_password_for_email(recovery_email.strip())
+                except Exception:
+                    # Avoid confirming whether an email is registered.
+                    pass
+                st.info(
+                    "If this account exists and email delivery is configured, "
+                    "a recovery code will be sent. Check your inbox or spam folder."
+                )
+
+        with st.form("recovery_complete_form"):
+            code_email = st.text_input("Account email", key="recovery_code_email")
+            recovery_code = st.text_input("Recovery code from email", key="recovery_code")
+            recovery_new_password = st.text_input(
+                "New password (12 characters minimum)",
+                type="password", key="recovery_new_password"
+            )
+            recovery_confirm = st.text_input(
+                "Confirm new password", type="password", key="recovery_confirm"
+            )
+            complete_recovery = st.form_submit_button(
+                "Set new password", use_container_width=True
+            )
+        if complete_recovery:
+            if len(recovery_new_password) < 12:
+                st.error("Use a password with at least 12 characters.")
+            elif recovery_new_password != recovery_confirm:
+                st.error("New passwords do not match.")
+            elif not code_email.strip() or not recovery_code.strip():
+                st.error("Enter your email and recovery code.")
+            else:
+                try:
+                    candidate = new_user_client()
+                    result = candidate.auth.verify_otp({
+                        "email": code_email.strip(),
+                        "token": recovery_code.strip(),
+                        "type": "recovery",
+                    })
+                    if result.session is None or result.user is None:
+                        raise RuntimeError("Recovery not verified")
+                    candidate.auth.update_user({"password": recovery_new_password})
+                    candidate.auth.sign_out()
+                    st.success("Password updated. Sign in using the Sign in tab.")
+                except Exception:
+                    st.error("The code was invalid, expired, or could not be verified. Request a new code and try again.")
+
     st.caption(
         "Conversations are saved to your account and processed by external AI providers. "
+        "AI image requests may be processed by volunteer AI Horde workers. "
         "Do not submit sensitive personal information."
     )
 
@@ -474,6 +553,7 @@ try:
     if not verified_identity.user:
         raise RuntimeError("User could not be verified")
     verified_user_id = str(verified_identity.user.id)
+    st.session_state.user_email = verified_identity.user.email or st.session_state.user_email
     if verified_user_id != st.session_state.user_id:
         raise RuntimeError("Session identity mismatch")
 except Exception:
@@ -595,12 +675,14 @@ def get_private_image(image_path):
 def remove_current_conversation(conversation_id):
     rows = list_my_messages(conversation_id)
     image_paths = [r["image_path"] for r in rows if r.get("image_path")]
+    if image_paths:
+        # Storage objects must be deleted using the Storage API, not database SQL.
+        # Clean up objects before deleting the conversation metadata.
+        for start in range(0, len(image_paths), 100):
+            db.storage.from_("chat-images").remove(image_paths[start:start + 100])
     db.table("chat_conversations").delete().eq("id", conversation_id).eq(
         "user_id", verified_user_id
     ).execute()
-    if image_paths:
-        # Private image file cleanup is best-effort; report failure to the user.
-        db.storage.from_("chat-images").remove(image_paths)
     for p in image_paths:
         st.session_state.setdefault("chat_image_cache", {}).pop(p, None)
 
@@ -634,6 +716,252 @@ for conversation in my_conversations:
 if is_admin:
     st.sidebar.caption("Administrator account")
 
+
+
+# ------------------------------------------------------------------------------
+# User account settings, data export and account deletion
+# ------------------------------------------------------------------------------
+if "account_settings_open" not in st.session_state:
+    st.session_state.account_settings_open = False
+
+if st.sidebar.button("⚙️ Account settings", use_container_width=True):
+    st.session_state.account_settings_open = not st.session_state.account_settings_open
+    st.rerun()
+
+
+def list_all_my_conversations():
+    """Paginate for a full export; the sidebar only shows recent chats."""
+    result = []
+    offset = 0
+    while True:
+        page = (
+            db.table("chat_conversations")
+            .select("id,title,created_at,updated_at")
+            .eq("user_id", verified_user_id)
+            .order("created_at")
+            .range(offset, offset + 499)
+            .execute()
+        ).data or []
+        result.extend(page)
+        if len(page) < 500:
+            break
+        offset += 500
+    return result
+
+
+def build_account_export_zip():
+    """Export all user-owned chats and stored images to an in-memory ZIP.
+
+    An upper bound avoids consuming the Streamlit instance's entire RAM.
+    If the archive is too large, no partial export is offered as a complete one.
+    """
+    max_total_bytes = 80 * 1024 * 1024
+    collected = 0
+    output = io.BytesIO()
+    conversations = list_all_my_conversations()
+    archive_index = []
+
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for convo in conversations:
+            cid = str(convo["id"])
+            rows = list_my_messages(cid)
+            archive_index.append(convo)
+            serializable = []
+            for row in rows:
+                record = dict(row)
+                path = record.get("image_path")
+                if path:
+                    # Add only objects in the currently verified user's folder.
+                    picture = get_private_image(path)
+                    collected += len(picture)
+                    if collected > max_total_bytes:
+                        raise ValueError(
+                            "Your image collection exceeds the 80 MB online-export "
+                            "limit. Contact the app owner for an alternate export."
+                        )
+                    archive.writestr("images/" + path.replace("/", "_"), picture)
+                serializable.append(record)
+            text = json.dumps(serializable, ensure_ascii=False, indent=2, default=str)
+            collected += len(text.encode("utf-8"))
+            if collected > max_total_bytes:
+                raise ValueError(
+                    "Your account exceeds the 80 MB online-export limit. "
+                    "Contact the app owner for an alternate export."
+                )
+            archive.writestr(f"chats/{cid}.json", text)
+        archive.writestr(
+            "conversations.json",
+            json.dumps(archive_index, ensure_ascii=False, indent=2, default=str),
+        )
+    return output.getvalue()
+
+
+def delete_own_account(password: str):
+    """Invoke a separately deployed privileged Edge Function.
+
+    The function must validate the caller's access token AND the password.
+    No service-role key is ever available inside this Python application.
+    """
+    session = db.auth.get_session()
+    if session is None or not session.access_token:
+        raise RuntimeError("Please sign in again before deleting your account.")
+    response = requests.post(
+        SUPABASE_URL.rstrip("/") + "/functions/v1/delete-my-account",
+        headers={
+            "Authorization": "Bearer " + session.access_token,
+            "apikey": SUPABASE_KEY,
+            "Content-Type": "application/json",
+        },
+        json={"password": password},
+        timeout=120,
+    )
+    if response.status_code != 200:
+        raise RuntimeError(
+            "Account deletion was not completed. Check that the delete-my-account "
+            "Edge Function is deployed, then try again or contact the app owner."
+        )
+    data = response.json()
+    if data.get("deleted") is not True:
+        raise RuntimeError("The account deletion service did not confirm deletion.")
+
+
+if st.session_state.account_settings_open:
+    st.title("Account settings")
+    st.caption("Manage your account, security and stored data.")
+
+    if st.button("← Back to Chemistry AI", key="back_from_account"):
+        st.session_state.account_settings_open = False
+        st.rerun()
+
+    profile_tab, security_tab, data_tab = st.tabs(
+        ["Profile", "Security", "Privacy and data"]
+    )
+
+    with profile_tab:
+        st.markdown(f"**Email address:** {st.session_state.user_email}")
+        metadata = verified_identity.user.user_metadata or {}
+        current_name = str(metadata.get("display_name", ""))
+        with st.form("profile_name_form"):
+            new_name = st.text_input("Display name", value=current_name, max_chars=50)
+            save_name = st.form_submit_button("Save display name")
+        if save_name:
+            try:
+                db.auth.update_user({"data": {"display_name": new_name.strip()}})
+                st.success("Display name updated.")
+            except Exception:
+                st.error("Could not update your display name. Please retry.")
+
+        with st.form("change_email_form"):
+            new_email = st.text_input("New email address", key="change_email_value")
+            change_email = st.form_submit_button("Request email change")
+        if change_email:
+            if not new_email.strip() or "@" not in new_email:
+                st.error("Enter a valid email address.")
+            else:
+                try:
+                    db.auth.update_user({"email": new_email.strip()})
+                    st.success(
+                        "If the address is valid, follow the confirmation emails "
+                        "sent by Supabase. Your current address remains in use "
+                        "until verification is completed."
+                    )
+                except Exception:
+                    st.error("Email change could not be requested. Please retry.")
+
+    with security_tab:
+        st.markdown("**Change your password**")
+        st.caption("Use the Reset password tab on the sign-in screen if you forget your password.")
+        with st.form("change_password_form"):
+            current_password = st.text_input("Current password", type="password")
+            new_password = st.text_input("New password (12+ characters)", type="password")
+            new_confirm = st.text_input("Confirm new password", type="password")
+            change_password = st.form_submit_button("Update password")
+        if change_password:
+            if len(new_password) < 12:
+                st.error("Use at least 12 characters.")
+            elif new_password != new_confirm:
+                st.error("New passwords do not match.")
+            else:
+                try:
+                    # Reauthenticate against a separate client before modifying credentials.
+                    candidate = new_user_client()
+                    confirmation = candidate.auth.sign_in_with_password({
+                        "email": str(verified_identity.user.email),
+                        "password": current_password,
+                    })
+                    if not confirmation.user or str(confirmation.user.id) != verified_user_id:
+                        raise RuntimeError("Wrong current password")
+                    db.auth.update_user({"password": new_password})
+                    st.success("Password changed. Consider signing out of other devices.")
+                except Exception:
+                    st.error("Password could not be changed. Verify your current password and try again.")
+
+    with data_tab:
+        st.markdown("**Your privacy**")
+        st.write(
+            "Your chat messages and generated diagrams are stored in Supabase. "
+            "Chat messages are processed by Groq to generate answers. "
+            "Optional images use AI Horde, a volunteer-operated image service; "
+            "avoid sensitive personal information in image requests."
+        )
+        st.caption(
+            "Access controls are enforced in Supabase through row-level security. "
+            "This beta does not provide a secure long-lived remember-me cookie; "
+            "you may need to sign in again after a browser reconnection."
+        )
+        st.markdown("**Download your data**")
+        if st.button("Prepare my data export", use_container_width=True):
+            try:
+                with st.spinner("Preparing your chats and generated images..."):
+                    st.session_state.account_export_zip = build_account_export_zip()
+                st.success("Your private archive is ready.")
+            except Exception as exc:
+                st.session_state.pop("account_export_zip", None)
+                st.error(f"Could not prepare a complete export: {exc}")
+        if st.session_state.get("account_export_zip"):
+            st.download_button(
+                "Download all chats and images (ZIP)",
+                data=st.session_state.account_export_zip,
+                file_name="ocr-chemistry-my-data.zip",
+                mime="application/zip",
+                use_container_width=True,
+            )
+
+        st.divider()
+        st.markdown("**Delete account permanently**")
+        st.warning(
+            "This permanently deletes your account, chats and images stored in "
+            "Supabase. Copies already processed by external AI providers may be "
+            "subject to their own retention policies. This cannot be undone. "
+            "The feature requires the separately deployed "
+            "Supabase Edge Function named delete-my-account."
+        )
+        with st.form("delete_my_account_form"):
+            delete_email = st.text_input("Type your account email to confirm", key="account_delete_email")
+            delete_password = st.text_input(
+                "Current password", type="password", key="account_delete_password"
+            )
+            confirm_delete = st.checkbox(
+                "I understand this action permanently deletes my account.",
+                key="account_delete_confirm",
+            )
+            delete_submit = st.form_submit_button("Permanently delete my account")
+        if delete_submit:
+            if not confirm_delete or delete_email.strip().casefold() != st.session_state.user_email.casefold():
+                st.error("Confirm deletion and enter the exact email address for this account.")
+            elif not delete_password:
+                st.error("Enter your current password.")
+            else:
+                try:
+                    with st.spinner("Deleting account and personal data..."):
+                        delete_own_account(delete_password)
+                    reset_user_session()
+                    st.session_state.account_deleted_notice = True
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
+
+    st.stop()
 
 # ------------------------------------------------------------------------------
 # 5. RAG Engine: OCR-aware PDF Processing, Metadata & Retrieval
@@ -2194,7 +2522,7 @@ def generate_horde_image(
         "replacement_filter": True,
         "allow_downgrade": True,
         "r2": True,
-        "shared": True,
+        "shared": False,
     }
 
     submit_response = requests.post(
@@ -2664,4 +2992,8 @@ if user_input := st.chat_input("Ask a question about OCR Chemistry..."):
             )
 
         except Exception as err:
-            st.error(f"API Error encountered: {str(err)}")
+            status = getattr(err, "status_code", None)
+            if status == 429:
+                st.warning("The AI service is temporarily at its rate limit. Please retry shortly.")
+            else:
+                st.error("The AI response could not be completed. Please retry shortly.")
