@@ -428,7 +428,7 @@ def show_auth_screen():
     with register_tab:
         with st.form("signup_form"):
             new_email = st.text_input("Email address", key="sign_up_email")
-            new_password = st.text_input("Password (at least 12 characters)", type="password", key="sign_up_password")
+            new_password = st.text_input("Password", type="password", key="sign_up_password")
             confirm_password = st.text_input("Confirm password", type="password", key="sign_up_confirm")
             privacy_acknowledged = st.checkbox(
                 "I understand that chats are saved in Supabase and sent to Groq "
@@ -438,7 +438,7 @@ def show_auth_screen():
         if register:
             if not privacy_acknowledged:
                 st.error("Read and acknowledge how your data is processed.")
-            elif len(new_password) < 12:
+            elif len(new_password) < 8:
                 st.error("Use a password of at least twelve characters.")
             elif new_password != confirm_password:
                 st.error("Passwords do not match.")
