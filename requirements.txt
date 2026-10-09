@@ -5,3 +5,4 @@ sentence-transformers
 groq
 requests
 supabase>=2.0,<3.0
+rdkit>=2025.03
