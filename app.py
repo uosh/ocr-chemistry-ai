@@ -1849,13 +1849,16 @@ def build_model_history(messages, max_messages=14):
 # 6. Deterministic Chemistry Diagram Engine
 # ------------------------------------------------------------------------------
 def visual_request_kind(text: str) -> str:
-    """Route visual requests without assuming all drawings fit an SVG primitive list.
+    """Safety-first visual routing. Exact scientific diagrams NEVER reach AI Horde.
 
-    Returns: 'mechanism', 'molecule', 'visual', or 'none'.
-    Mechanisms have their own accuracy restrictions; all other unsupported
-    visuals use a purpose-built image generator rather than guessed SVG coords.
+    'mechanism' -> curated templates, else explanatory text, never pixels
+    'molecule'  -> RDKit valence-checked SMILES, never generative pixels
+    'apparatus' -> labelled deterministic drawings, else explanatory text
+    'precision' -> other exact scientific requests: explain unsupported
+    'visual'    -> generic illustrations: optional image models / AI Horde
+    'none'      -> ordinary question answered with retrieval and Groq
     """
-    s = (text or "").strip().lower()
+    s = re.sub(r"\s+", " ", (text or "").lower()).strip()
     if not s:
         return "none"
     visual_terms = (
@@ -1863,32 +1866,93 @@ def visual_request_kind(text: str) -> str:
         "visuali", "depict", "render", "show me", "make an image",
         "generate an image", "generate a picture", "generate a diagram",
     )
-    visual = any(term in s for term in visual_terms)
-    if not visual:
+    if not any(t in s for t in visual_terms):
         return "none"
-    mech_terms = (
+
+    mechanism = (
         "mechanism", "curly arrow", "curved arrow", "electron pushing",
-        "electron-pushing", "nucleophilic substitution", "electrophilic substitution",
+        "electron-pushing", "friedel", "nitration", "esterification",
+        "electrophilic substitution", "nucleophilic substitution",
         "electrophilic addition", "nucleophilic addition",
+        "elimination reaction", "reaction mechanism", "reaction of benzene",
+        "sn1", "sn2", "e1 mechanism", "e2 mechanism", "radical substitution",
+        "free radical", "hydrolysis of", "ester hydrolysis", "alkylation",
+        "acylation", "substitution reaction", "addition reaction", "halogenation",
+        "electrophilic attack", "nucleophilic attack", "arrow-pushing",
+        "curly arrows", "fischer", "bromination of", "halogenoalkane reaction",
+        "organic reaction", "elimination of", "rearrangement mechanism",
+        "aldol", "condensation reaction", "hydrolysis reaction",
+        "addition-elimination", "reduction of", "oxidation of",
     )
-    if any(term in s for term in mech_terms):
+    if any(t in s for t in mechanism):
         return "mechanism"
-    molecular_terms = (
+
+    apparatus = (
+        "apparatus", "distillation", "reflux", "titration", "burette",
+        "electrolysis", "electrolytic cell", "calorimeter", "chromatography",
+        "condenser", "filtration", "buchner", "gas syringe",
+        "experimental setup", "laboratory setup",
+    )
+    if any(t in s for t in apparatus):
+        return "apparatus"
+
+    molecular = (
         "skeletal formula", "skeletal structure", "structural formula",
         "displayed formula", "molecular structure", "organic structure",
         "bond-line", "bond line", "structure of", "structure for",
-        "show the molecule", "draw the molecule", "chemical structure",
+        "show the molecule", "draw the molecule", "draw a molecule", "molecule of",
+        "chemical structure",
+        "smiles:", "smiles=", "benzene ring", "draw benzene", "draw ethanol",
+        "draw aspirin", "draw phenylamine", "draw but-", "draw propan-",
+        "draw methyl", "draw 2-methyl",
     )
-    if any(term in s for term in molecular_terms):
-        # Lewis dot diagrams require lone-pair layout RDKit does not guarantee.
-        if "lewis" not in s and "electron dot" not in s:
-            return "molecule"
+    if any(t in s for t in molecular) and "lewis" not in s and "electron dot" not in s:
+        return "molecule"
+    if "3d molecule" in s or "three-dimensional molecule" in s:
+        return "precision"  # Current RDKit display is a 2D structure only.
+    # A bare named-compound request ("draw propene") is still a STRUCTURE,
+    # even though it does not explicitly contain the word 'molecule'.
+    if re.search(
+        r"\b(?:draw|sketch|render|depict|show me)\s+(?:(?:the|a|an)\s+)?"
+        r"(?:[a-z0-9,\-]*?(?:ane|ene|yne|anol|anone|amine|benzene|phenol|"
+        r"aldehyde|ketone|ether|ethanoic acid|methanoic acid|propanone|aspirin))\b",
+        s,
+    ):
+        return "molecule"
+
+    exact = (
+        "reaction pathway", "reaction scheme", "reaction diagram",
+        "orbital diagram", "electron configuration", "electron dot",
+        "dot and cross", "lewis structure", "lewis dot", "ionic bonding",
+        "covalent bonding", "energy level diagram", "enthalpy profile",
+        "energy profile", "reaction profile", "phase diagram",
+        "cell diagram", "electrochemical cell", "polymer repeat",
+        "repeat unit", "chemical equation", "balanced equation",
+        "cyclohexane chair", "chromatogram", "mass spectrum", "ir spectrum",
+        "nmr spectrum", "electronic structure", "orbital", "electron shell",
+        "atomic structure", "atomic diagram", "ion lattice", "ionic lattice",
+        "crystal lattice", "lattice structure", "reaction coordinate",
+        "molecular geometry", "3d molecule", "hybridization diagram",
+    )
+    if any(t in s for t in exact):
+        return "precision"
+    # Catch chemistry topics not yet represented by our small vocabulary. These
+    # should be text explanations, not plausible-looking false diagrams.
+    art_direction = ("cartoon", "poster", "artwork", "painting", "background",
+                     "fantasy", "mascot", "photograph", "photo of", "cute", "logo")
+    chemical_subject = ("atom", "chemical", "chemistry", "molecule", "reaction",
+                        "benzene", "bond", "polymer", "ions", "electrode", "reagent",
+                        "alkene", "alkane", "oxidation", "reduction", "ester",
+                        "carboxylic", "alkali", "acid-base", "acid base", "halogen",
+                        "equilibrium", "pH chart", "indicator chart", "spectra",
+                        "nucleophile", "electrophile", "hydrogen bond")
+    if any(t in s for t in chemical_subject) and not any(t in s for t in art_direction):
+        return "precision"
     return "visual"
 
 
 def is_diagram_request(text: str) -> bool:
-    """Compatibility wrapper. Does not force arbitrary 'draw' requests to SVG."""
-    return visual_request_kind(text) in {"mechanism", "molecule"}
+    return visual_request_kind(text) in {"mechanism", "molecule", "apparatus", "precision"}
 
 
 def is_fischer_esterification_mechanism_request(request: str) -> bool:
@@ -2193,6 +2257,386 @@ def render_friedel_crafts_acylation_svg() -> str:
     parts.append(txt(862,y+370,"aryl ketone",23,color="#476174"))
     parts.append('</svg></div>')
     return ''.join(parts)
+
+
+# -----------------------------------------------------------------------------
+# 6B. Reviewable, deterministic exam diagrams. No AI pixels / SVG coordinates.
+# -----------------------------------------------------------------------------
+
+
+def _benzene_request_matches_template(request: str, mode: str) -> bool:
+    """Prevent an example for benzene being mislabelled as a substituted-arene case."""
+    s = (request or "").lower()
+    substitutions = (
+        "methylbenzene", "toluene", "ethylbenzene", "phenol", "aniline",
+        "phenylamine", "nitrobenzene", "chlorobenzene", "bromobenzene",
+        "anisole", "naphthalene", "substituted benzene", "substituted arene",
+    )
+    # 'make nitrobenzene from benzene' is supported; 'nitrate nitrobenzene' isn't.
+    if mode == "nitration" and "nitrobenzene" in s:
+        if re.search(r"(?:of|on|nitrate|nitrating|from)\s+nitrobenzene", s):
+            return False
+        substitutions = tuple(x for x in substitutions if x != "nitrobenzene")
+    if any(x in s for x in substitutions):
+        return False
+    if mode == "alkylation":
+        # This drawn worked example uses benzene + chloromethane, producing toluene.
+        if any(x in s for x in (
+            "chloroethane", "bromoethane", "chloropropane", "bromopropane",
+            "2-chloro", "2-bromo", "propene", "ethene", "ethylbenzene",
+            "isopropyl", "butane", "butyl", "phenethyl", "benzyl chloride",
+            "bromomethane", "iodomethane", "iodoethane",
+        )):
+            return False
+    return True
+
+
+def curated_mechanism_for_request(request: str) -> dict | None:
+    """Choose a scientific mechanism by chemical identity, never keyword fallback.
+
+    Template selection remains intentionally conservative: unsupported substrates or
+    reagents are NOT silently mapped to an unrelated textbook example.
+    """
+    s = (request or "").lower()
+    if "friedel" in s and "craft" in s:
+        if "acyl" in s and _benzene_request_matches_template(s, "acylation"):
+            return friedel_crafts_acylation_spec()
+        if "alkyl" in s and _benzene_request_matches_template(s, "alkylation"):
+            return {
+                "template": "friedel_crafts_alkylation_v1",
+                "title": "Friedel–Crafts alkylation of benzene",
+                "caption": (
+                    "Worked example: benzene + CH₃Cl with AlCl₃ gives methylbenzene. "
+                    "CH₃⁺ is the usual simplified A-level electrophile representation; "
+                    "actual electrophile formation involves Lewis-acid activation. "
+                    "Alkylation may undergo further substitution."
+                ),
+                "elements": [],
+            }
+        return None
+    if "nitrat" in s and ("benzene" in s or "arene" in s or "ring" in s or "electrophil" in s or "mechanism" in s):
+        if _benzene_request_matches_template(s, "nitration"):
+            return {
+                "template": "benzene_nitration_v1",
+                "title": "Nitration of benzene",
+                "caption": (
+                    "Concentrated HNO₃/H₂SO₄ generates NO₂⁺. Benzene attacks NO₂⁺, "
+                    "forming a σ complex; loss of H⁺ restores aromaticity and "
+                    "regenerates H₂SO₄. Product: nitrobenzene."
+                ),
+                "elements": [],
+            }
+        return None
+    if is_fischer_esterification_mechanism_request(s):
+        return fischer_esterification_diagram_spec()
+    return None
+
+
+def _eas_text(x, y, s, size=25, anchor="middle", color="#203449", bold=False):
+    return (f'<text x="{x}" y="{y}" text-anchor="{anchor}" '
+            f'font-size="{size}" fill="{color}" '
+            f'font-weight="{700 if bold else 400}" '
+            f'font-family="Arial,sans-serif">{html.escape(str(s))}</text>')
+
+
+def _eas_line(x1, y1, x2, y2, color="#274156", width=4):
+    return (f'<path d="M {x1:.1f} {y1:.1f} L {x2:.1f} {y2:.1f}" '
+            f'fill="none" stroke="{color}" stroke-width="{width}" '
+            'stroke-linecap="round"/>')
+
+
+def _eas_curve(x1, y1, cx, cy, x2, y2):
+    return (f'<path d="M {x1:.1f} {y1:.1f} Q {cx:.1f} {cy:.1f} '
+            f'{x2:.1f} {y2:.1f}" fill="none" stroke="#086cad" '
+            'stroke-width="4" stroke-linecap="round" '
+            'marker-end="url(#v3-electron-arrow)"/>')
+
+
+def _eas_ring(cx, cy, radius=78, *, sigma=False, group=None):
+    """Hexagonal Kekulé contributor; sigma complex has TWO C=C bonds.
+
+    Substituent and hydrogen are drawn as separate single bonds from C0;
+    positive charge indicated on C1 in sigma-complex resonance form.
+    """
+    import math
+    vertices = [(cx+radius*math.cos(math.radians(-90+60*i)),
+                 cy+radius*math.sin(math.radians(-90+60*i))) for i in range(6)]
+    pieces=[]
+    for i in range(6):
+        a,b=vertices[i],vertices[(i+1)%6]
+        pieces.append(_eas_line(*a,*b))
+    dbls=((2,3),(4,5)) if sigma else ((0,1),(2,3),(4,5))
+    for i,j in dbls:
+        a,b=vertices[i],vertices[j]
+        # inset bonds are parallel and visibly within the ring
+        pieces.append(_eas_line(cx+(a[0]-cx)*.77,cy+(a[1]-cy)*.77,
+                                 cx+(b[0]-cx)*.77,cy+(b[1]-cy)*.77,width=3))
+    topx,topy=vertices[0]
+    if group:
+        pieces.append(_eas_line(topx,topy,topx,topy-42,width=3))
+        pieces.append(_eas_text(topx,topy-53,group,24,bold=True))
+    if sigma:
+        pieces.append(_eas_line(topx+6,topy-7,topx+26,topy-29,width=3))
+        pieces.append(_eas_text(topx+47,topy-34,"H",23))
+        px,py=vertices[1]
+        pieces.append(_eas_text(px+26,py-12,"+",30,color="#b43745",bold=True))
+    return "".join(pieces),vertices
+
+
+def render_aromatic_eas_svg(template: str) -> str:
+    """Hand-positioned 3-stage electrophilic aromatic substitution plate.
+
+    Supported: Friedel-Crafts *methylation* and benzene nitration only.
+    The SVG contains no model-supplied raw markup or arbitrary coordinates.
+    """
+    if template == "friedel_crafts_alkylation_v1":
+        cfg={
+            "title":"Friedel–Crafts alkylation: methylbenzene",
+            "subtitle":"Worked example: C₆H₆ + CH₃Cl  — AlCl₃ →  C₆H₅CH₃ + HCl",
+            "source":"CH₃Cl   +   AlCl₃",
+            "electrophile":"CH₃⁺   +   AlCl₄⁻",
+            "source_note":"CH₃⁺ is A-level shorthand for a Lewis-acid-activated electrophile.",
+            "incoming":"CH₃⁺", "group":"CH₃", "base":"AlCl₄⁻",
+            "product":"methylbenzene", "byproducts":"HCl + AlCl₃",
+            "final_note":"The C–H bond electrons restore aromaticity; AlCl₃ is regenerated.",
+            "caution":"Note: alkyl groups activate the ring, so multiple substitution can occur.",
+        }
+    elif template == "benzene_nitration_v1":
+        cfg={
+            "title":"Nitration of benzene: curly-arrow mechanism",
+            "subtitle":"C₆H₆ + HNO₃  — conc. H₂SO₄ →  C₆H₅NO₂ + H₂O",
+            "source":"HNO₃   +   H₂SO₄",
+            "electrophile":"NO₂⁺ + HSO₄⁻ + H₂O",
+            "source_note":"Nitronium NO₂⁺ is formed in the mixed acid.",
+            "incoming":"NO₂⁺", "group":"NO₂", "base":"HSO₄⁻",
+            "product":"nitrobenzene", "byproducts":"H₂SO₄",
+            "final_note":"HSO₄⁻ acts as the base and the acid catalyst is regenerated.",
+            "caution":"Concentrated HNO₃/H₂SO₄; typically warm below about 55 °C.",
+        }
+    else:
+        raise ValueError("Unknown aromatic substitution template")
+
+    out=["""<div style="background:white;border:1px solid #cfdae4;border-radius:12px;
+       max-width:1150px;margin:auto;padding:10px;box-sizing:border-box">
+       <svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 1160 1610"
+            role="img" aria-label="Hand-drawn educational electrophilic aromatic substitution mechanism">
+       <defs>
+         <marker id="v3-electron-arrow" viewBox="0 0 10 10" refX="9" refY="5"
+          markerWidth="5" markerHeight="5" orient="auto">
+          <path d="M0 0 L10 5 L0 10 Z" fill="#086cad"/>
+         </marker>
+         <marker id="v3-rxn-arrow" viewBox="0 0 10 10" refX="9" refY="5"
+          markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M0 0 L10 5 L0 10 Z" fill="#5b6e7e"/>
+         </marker>
+       </defs><rect width="1160" height="1610" fill="white"/>"""]
+    T=_eas_text; L=_eas_line; C=_eas_curve
+    out.extend([T(580,60,cfg['title'],38,bold=True),T(580,102,cfg['subtitle'],23,color="#466174")])
+
+    panels=[
+        (135,"1","Form the electrophile","Lewis acid / mixed-acid activation gives the electrophile."),
+        (590,"2","π-electron attack and σ-complex formation","A ring π pair bonds to the electrophile; the ring temporarily loses aromaticity."),
+        (1045,"3","Deprotonation regenerates the aromatic ring","Base removes the attached H; the C–H electrons form a new ring π bond."),
+    ]
+    for y,num,title,detail in panels:
+        out.append(f'<rect x="24" y="{y}" width="1112" height="424" rx="18" fill="#f5f9fc" stroke="#cfdee8" stroke-width="2"/>')
+        out.append(f'<circle cx="69" cy="{y+51}" r="26" fill="#155e91"/>')
+        out.append(T(69,y+59,num,26,color="white",bold=True))
+        out.append(T(119,y+60,title,29,anchor="start",bold=True))
+        out.append(T(67,y+387,detail,19,anchor="start",color="#466174"))
+
+    y=135
+    out.append(T(255,y+215,cfg['source'],34))
+    out.append(L(475,y+203,649,y+203,color="#5b6e7e",width=4))
+    out.append('<path d="M 650 %s l -17 -9 v 18 Z" fill="#5b6e7e"/>'%(y+203))
+    out.append(T(889,y+215,cfg['electrophile'],31))
+    out.append(T(580,y+313,cfg['source_note'],22,color="#086cad"))
+
+    y=590
+    b,v=_eas_ring(242,y+232)
+    out.append(b)
+    out.append(T(242,y+366,"benzene",20,color="#466174"))
+    out.append(T(552,y+199,cfg['incoming'],33,color="#9b3040",bold=True))
+    # Curved arrow starts near the C0=C1 π bond; its head ends at electrophile.
+    mid=((v[0][0]+v[1][0])/2,(v[0][1]+v[1][1])/2)
+    out.append(C(mid[0]-9,mid[1],435,y+135,523,y+202))
+    out.append(T(425,y+100,"π pair → electrophile",20,color="#086cad"))
+    out.append(L(672,y+241,754,y+241,color="#5b6e7e"))
+    out.append(f'<path d="M 753 {y+241} l -17 -9 v 18 Z" fill="#5b6e7e"/>')
+    b,v2=_eas_ring(924,y+243,sigma=True,group=cfg['group'])
+    out.append(b)
+    out.append(T(924,y+369,"σ complex (arenium ion)",20,color="#466174"))
+
+    y=1045
+    b,v=_eas_ring(233,y+237,sigma=True,group=cfg['group'])
+    out.append(b)
+    out.append(T(490,y+222,cfg['base'],30))
+    top=v[0]
+    # Electron pair from base toward the H on C0 (blue curve).
+    out.append(C(448,y+230,386,y+99,top[0]+43,top[1]-34))
+    out.append(T(474,y+112,"base → H",18,color="#086cad"))
+    # The C-H bond pair goes into the C0-C1 edge to restore the ring double bond.
+    c1=v[1]
+    out.append(C(top[0]+23,top[1]-17,top[0]+76,top[1]-13,
+                 (top[0]+c1[0])/2+3,(top[1]+c1[1])/2+10))
+    out.append(T(427,y+344,"C–H pair → ring",19,color="#086cad"))
+    out.append(L(606,y+230,715,y+230,color="#5b6e7e"))
+    out.append(f'<path d="M 714 {y+230} l -17 -9 v 18 Z" fill="#5b6e7e"/>')
+    b,v2=_eas_ring(919,y+240,group=cfg['group'])
+    out.append(b)
+    out.append(T(919,y+365,cfg['product'],23,color="#426076",bold=True))
+    out.append(T(919,y+397,"+ " + cfg['byproducts'],19,color="#426076"))
+
+    out.append(T(580,1513,cfg['final_note'],22,color="#1b5374"))
+    out.append(T(580,1553,cfg['caution'],19,color="#73502c"))
+    out.append('</svg></div>')
+    return ''.join(out)
+
+
+def apparatus_spec_for_request(request: str) -> dict | None:
+    s=(request or "").lower()
+    # Fractional must be checked first, before simple distillation.
+    if "fractional distillation" in s or "fractionating column" in s:
+        key="fractional_distillation"
+        title="Fractional distillation apparatus"
+    elif "distill" in s:
+        key="simple_distillation";title="Simple distillation apparatus"
+    elif "reflux" in s:
+        key="reflux";title="Heating under reflux"
+    elif "titration" in s or "burette" in s:
+        key="titration";title="Acid–base titration"
+    elif "electrolysis" in s or "electrolytic cell" in s:
+        key="electrolysis";title="Electrolytic cell"
+    else:
+        return None
+    return {"template":"apparatus_v1_" + key,"title":title,
+            "caption":("Schematic of typical school laboratory apparatus. "
+                       "Follow your practical instructions and safety guidance "
+                       "for the actual chemicals and conditions."),"elements":[]}
+
+
+def render_apparatus_svg(apparatus: str) -> str:
+    """Deterministic labelled schematic. NOT arbitrary Groq/AI Horde image pixels."""
+    supported={"simple_distillation", "fractional_distillation", "reflux", "titration", "electrolysis"}
+    if apparatus not in supported:
+        raise ValueError("Unsupported apparatus figure")
+
+    def txt(x,y,t,size=23,anchor="middle"):
+        return (f'<text x="{x}" y="{y}" font-family="Arial,sans-serif" '
+                f'font-size="{size}" fill="#1c3d54" text-anchor="{anchor}">'
+                +html.escape(t)+'</text>')
+    def path(d,w=5,color="#29485c",fill="none"):
+        return f'<path d="{d}" fill="{fill}" stroke="{color}" stroke-width="{w}" stroke-linecap="round" stroke-linejoin="round"/>'
+    def label(x1,y1,x2,y2,text,x3,y3):
+        return path(f'M {x1} {y1} L {x2} {y2}',2,"#839bab")+txt(x3,y3,text,21,anchor="start")
+
+    titles={"simple_distillation":"Simple distillation", "fractional_distillation":"Fractional distillation",
+            "reflux":"Heating under reflux", "titration":"Acid–base titration",
+            "electrolysis":"Electrolysis using inert electrodes"}
+    out=['''<div style="max-width:1050px;background:white;padding:12px;border-radius:12px;
+              margin:auto;border:1px solid #d7e4eb"><svg viewBox="0 0 1100 720"
+              xmlns="http://www.w3.org/2000/svg" width="100%" role="img">''',
+         '<rect width="1100" height="720" fill="white"/>',
+         txt(550,55,titles[apparatus],38),
+         txt(550,87,"Labelled schematic — not to scale",20)]
+
+    if apparatus in {"simple_distillation", "fractional_distillation"}:
+        fractional=apparatus=="fractional_distillation"
+        # Round-bottom flask (circle) with a neck; distillation head lies at x480.
+        out += [path('M 230 375 C 154 393 137 523 190 556 C 246 610 342 558 333 474 C 330 423 294 386 260 375',5),
+                path('M 230 375 L 230 297'),path('M 260 375 L 260 297'),
+                path('M 163 495 Q 241 522 331 494 L 320 540 Q 250 579 188 541 Z',2,'#3895ba','#caeaf8')]
+        if fractional:
+            out += [path('M 230 297 L 230 169 M 260 297 L 260 169'),
+                    path('M 234 280 L 257 264 L 234 248 L 257 232 L 234 216 L 257 200'),
+                    path('M 230 169 L 480 169')]
+            head_y=169
+        else:
+            out += [path('M 230 297 L 230 236 M 260 297 L 260 236'),
+                    path('M 260 236 L 480 236')]
+            head_y=236
+        # thermometer and side arm across Liebig condenser; outer jacket slanted.
+        out += [path(f'M 377 {head_y} L 377 {head_y-94}',4),
+                path(f'M 366 {head_y-92} L 388 {head_y-92}'),
+                path(f'M 480 {head_y} L 845 404',6),
+                path(f'M 487 {head_y-24} L 857 380 L 879 426 L 504 {head_y+25} Z',4),
+                path(f'M 879 426 L 960 470',5),
+                path('M 956 464 L 956 530'),
+                path('M 908 528 Q 906 619 961 625 Q 1010 620 1010 528',4),
+                path('M 906 528 L 1012 528',4),
+                # condenser inlet is the lower end, outlet the upper end
+                path(f'M 842 429 L 842 493 L 914 493',4,'#1878b0'),
+                path(f'M 523 {head_y+30} L 523 {head_y+74} L 449 {head_y+74}',4,'#1878b0'),
+                txt(808,548,"Water IN (lower end)",20),
+                txt(516,head_y+104,"Water OUT (upper end)",20),
+                label(372,head_y-96,250,head_y-96,"thermometer",95,head_y-102),
+                label(245,410,64,380,"boiling mixture",30,372),
+                label(961,559,864,650,"distillate",805,676),
+                txt(247,630,"heat source",21)]
+        if fractional:
+            out.append(label(239,227,67,230,"fractionating",30,226))
+            out.append(txt(30,252,"column",21,anchor="start"))
+        out.append(path('M 180 659 L 310 659 M 195 646 L 295 646',5,'#e27c35'))
+        out.append(txt(670,640,"Cooling water enters at the lower end of the condenser",19))
+
+    elif apparatus=="reflux":
+        out += [path('M 510 226 L 510 351 M 570 226 L 570 351',5),
+                path('M 500 183 L 500 364 M 580 183 L 580 364',4),
+                path('M 510 190 L 570 190'),
+                path('M 500 364 L 580 364'),
+                path('M 500 340 L 440 340 L 440 397',4,'#1878b0'),
+                path('M 580 212 L 646 212 L 646 155',4,'#1878b0'),
+                path('M 524 351 L 524 419 M 556 351 L 556 419'),
+                path('M 524 419 C 453 449 457 558 515 590 Q 581 613 612 535 Q 625 461 556 419',5),
+                path('M 470 536 Q 529 563 603 531 L 588 561 Q 543 608 498 565 Z',2,'#3895ba','#caeaf8'),
+                path('M 450 633 L 628 633 M 479 622 L 602 622',5,'#e27c35'),
+                txt(277,431,"Water IN (bottom)",22),
+                txt(720,146,"Water OUT (top)",22),
+                txt(747,259,"vertical water condenser",22),
+                path('M 594 255 L 705 255',2,'#839bab'),
+                txt(540,689,"heat source / heating mantle",22),
+                txt(540,110,"Condenser remains open to air; do not seal the system",22)]
+
+    elif apparatus=="titration":
+        out += [path('M 470 150 L 470 470 M 504 150 L 504 470',5),
+                path('M 470 150 L 504 150 M 470 470 L 504 470'),
+                path('M 470 390 L 504 390',4),
+                path('M 487 470 L 487 501',5),
+                path('M 460 488 L 514 488',4),
+                path('M 487 501 L 487 526',4),
+                path('M 468 570 L 425 642 L 550 642 L 506 570',5),
+                path('M 468 570 L 506 570',4),
+                path('M 440 626 Q 487 643 539 626 L 526 635 L 451 635 Z',2,'#d68dbe','#f6d8ee'),
+                path('M 376 652 L 598 652',6,'#708d9b'),
+                path('M 650 138 L 650 667',6,'#667b88'),
+                path('M 508 250 L 650 250',5),
+                txt(280,243,"burette containing titrant",23),
+                path('M 465 244 L 380 239',2,'#839bab'),
+                txt(266,499,"tap / stopcock",21),
+                path('M 462 488 L 385 490',2,'#839bab'),
+                txt(760,582,"conical flask + indicator",23),
+                path('M 544 590 L 708 582',2,'#839bab'),
+                txt(751,660,"white tile",22),
+                path('M 598 652 L 708 656',2,'#839bab'),
+                txt(555,111,"Read the bottom of the meniscus at eye level",20)]
+
+    elif apparatus=="electrolysis":
+        out += [path('M 275 230 L 275 574 Q 277 607 312 607 L 790 607 Q 820 607 822 574 L 822 230',5),
+                path('M 280 390 L 818 390 L 818 574 Q 805 602 784 602 L 308 602 Q 282 587 280 572 Z',2,'#3895ba','#d9effa'),
+                path('M 399 253 L 399 538',17,'#4b555d'),
+                path('M 704 253 L 704 538',17,'#4b555d'),
+                path('M 399 245 L 399 165 L 490 165',4,'#b53b41'),
+                path('M 704 245 L 704 165 L 610 165',4,'#246ba3'),
+                path('M 490 130 L 610 130 L 610 198 L 490 198 Z',3,'#29485c','#f0f4f7'),
+                txt(525,173,"+",27),txt(576,173,"−",27),
+                txt(550,112,"DC power supply",23),
+                txt(321,298,"anode (+)",21),
+                txt(796,298,"cathode (−)",21),
+                txt(550,662,"electrolyte solution",24),
+                txt(550,703,"Products depend on the ions, solvent and electrodes.",21)]
+
+    out.append('</svg></div>')
+    return ''.join(out)
 
 
 def is_molecular_structure_request(request: str) -> bool:
@@ -2557,6 +3001,10 @@ def render_chemistry_svg(spec: dict) -> str:
         return render_friedel_crafts_acylation_svg()
     if spec.get("template") == "rdkit_structure_v1":
         return render_rdkit_structure_svg(spec)
+    if spec.get("template") in ("friedel_crafts_alkylation_v1", "benzene_nitration_v1"):
+        return render_aromatic_eas_svg(spec["template"])
+    if str(spec.get("template", "")).startswith("apparatus_v1_"):
+        return render_apparatus_svg(spec["template"].removeprefix("apparatus_v1_"))
 
     title = str(spec.get("title", "Chemistry diagram"))
     elements = spec.get("elements", [])
@@ -2873,8 +3321,8 @@ def display_chemistry_diagram(svg: str, height: int = 720):
 # 7. AI Horde Image Generation
 # ------------------------------------------------------------------------------
 def is_image_request(text: str) -> bool:
-    """Any visual prompt beyond curated reaction templates can use a real image model."""
-    return visual_request_kind(text) != "none"
+    """Only non-exact artistic illustrations may use free image-generation APIs."""
+    return visual_request_kind(text) == "visual"
 
 
 def create_chemistry_image_prompt(user_request: str, retrieved_chunks=None) -> str:
@@ -3248,83 +3696,90 @@ if user_input := st.chat_input("Ask a question about OCR Chemistry..."):
         st.markdown(user_input)
 
     # --------------------------------------------------------------------------
-    # Deterministic chemistry diagram route
+    # Scientific figures are never routed to diffusion/image generators.
     # --------------------------------------------------------------------------
     kind = visual_request_kind(user_input)
-    known_mechanism = kind == "mechanism" and (
-        is_fischer_esterification_mechanism_request(user_input)
-        or is_friedel_crafts_acylation_request(user_input)
-    )
-    if known_mechanism or kind == "molecule":
+    if kind in {"mechanism", "molecule", "apparatus", "precision"}:
         with st.chat_message("assistant"):
             status_placeholder = st.empty()
-
             try:
-                status_placeholder.info("Building a chemically structured drawing...")
-
+                status_placeholder.info("Preparing a structured chemistry diagram...")
+                diagram_spec = None
                 if kind == "molecule":
                     diagram_spec = create_molecule_spec(user_input)
-                elif is_friedel_crafts_acylation_request(user_input):
-                    diagram_spec = friedel_crafts_acylation_spec()
+                elif kind == "apparatus":
+                    diagram_spec = apparatus_spec_for_request(user_input)
+                elif kind == "mechanism":
+                    diagram_spec = curated_mechanism_for_request(user_input)
+
+                if diagram_spec is not None:
+                    svg = render_chemistry_svg(diagram_spec)
+                    status_placeholder.empty()
+                    display_chemistry_diagram(svg)
+                    caption = diagram_spec.get("caption", "")
+                    if caption:
+                        st.caption(caption)
+                    with st.expander("Diagram specification"):
+                        st.json(diagram_spec)
+                    content = "Generated a structured chemistry diagram for: " + user_input
+                    save_message("assistant", content, kind="diagram",
+                                 caption=caption, diagram_spec=diagram_spec)
+                    st.session_state.messages.append(
+                        {"role":"assistant", "type":"diagram", "content":content,
+                         "svg":svg, "caption":caption}
+                    )
                 else:
-                    diagram_spec = fischer_esterification_diagram_spec()
-
-                svg = render_chemistry_svg(diagram_spec)
-                status_placeholder.empty()
-
-                display_chemistry_diagram(svg)
-
-                diagram_caption = diagram_spec.get("caption", "")
-                if diagram_caption:
-                    st.caption(diagram_caption)
-
-                with st.expander("Diagram specification"):
-                    st.json(diagram_spec)
-
-                diagram_content = f"Generated a chemistry diagram for: {user_input}"
-                save_message(
-                    "assistant",
-                    diagram_content,
-                    kind="diagram",
-                    caption=diagram_caption,
-                    diagram_spec=diagram_spec,
-                )
-                st.session_state.messages.append(
-                    {
-                        "role": "assistant", "type": "diagram",
-                        "content": diagram_content, "svg": svg,
-                        "caption": diagram_caption,
-                    }
-                )
-
+                    status_placeholder.empty()
+                    if kind == "mechanism":
+                        response_text = (
+                            "I don't yet have a reviewed drawing template for this exact "
+                            "reaction and set of reagents. I won't generate a chemically "
+                            "misleading mechanism with AI Horde.\n\n"
+                            "You can ask for a step-by-step written explanation, or use "
+                            "one of the current diagram templates: Fischer esterification, "
+                            "Friedel–Crafts acylation, Friedel–Crafts alkylation "
+                            "(benzene + chloromethane), or nitration of benzene."
+                        )
+                    elif kind == "apparatus":
+                        response_text = (
+                            "That apparatus isn't in the labelled drawing library yet. "
+                            "Available figures: simple distillation, fractional distillation, "
+                            "reflux, titration and an electrolysis cell. I'll avoid "
+                            "substituting a potentially incorrect AI-generated setup."
+                        )
+                    else:
+                        response_text = (
+                            "This exact scientific figure does not yet have a reliable "
+                            "renderer. I won't substitute a decorative AI-generated "
+                            "image for a technical diagram. Ask me to explain it in text."
+                        )
+                    st.info(response_text)
+                    save_message("assistant", response_text)
+                    st.session_state.messages.append(
+                        {"role":"assistant", "content":response_text}
+                    )
             except Exception as err:
                 status_placeholder.empty()
-
+                print(f"Structured chemistry diagram error: {type(err).__name__}: {err}")
                 error_message = (
-                    "I couldn't generate that diagram this time. "
-                    "Please try again, or ask for a step-by-step explanation."
+                    "The structured diagram could not be generated. I will not "
+                    "replace it with an unverified AI image. "
+                    "Try asking for a written explanation."
                 )
-                # Provider diagnostic information is not shown to end users.
-                # If you need diagnostics as the owner, consult Streamlit logs.
-                print(f"Chemistry diagram error: {type(err).__name__}: {err}")
-
                 st.error(error_message)
                 try:
                     save_message("assistant", error_message)
                 except Exception:
                     st.warning("The error message could not be saved.")
                 st.session_state.messages.append(
-                    {
-                        "role": "assistant", "content": error_message,
-                    }
+                    {"role":"assistant", "content":error_message}
                 )
-
         st.stop()
 
     # --------------------------------------------------------------------------
     # Any other visual request: a real image generation model, not guessed SVG
     # --------------------------------------------------------------------------
-    if is_image_request(user_input):
+    if kind == "visual" and is_image_request(user_input):
         with st.chat_message("assistant"):
             status_placeholder = st.empty()
 
