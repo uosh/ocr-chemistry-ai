@@ -351,6 +351,18 @@ HORDE_HEADERS = {
     "Content-Type": "application/json",
 }
 
+# Optional: paid image model for broader visual requests. The GROQ model stays fixed.
+# Without OPENAI_API_KEY, the existing free AI Horde path remains available.
+OPENAI_IMAGE_API_KEY = (
+    st.secrets.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
+).strip()
+IMAGE_PROVIDER = (
+    st.secrets.get("IMAGE_PROVIDER") or os.environ.get("IMAGE_PROVIDER") or "auto"
+).strip().lower()
+if IMAGE_PROVIDER not in {"auto", "openai", "horde"}:
+    IMAGE_PROVIDER = "auto"
+OPENAI_IMAGE_MODEL = "gpt-image-2"
+
 
 # ------------------------------------------------------------------------------
 # Account authentication and durable conversation storage
@@ -1836,49 +1848,47 @@ def build_model_history(messages, max_messages=14):
 # ------------------------------------------------------------------------------
 # 6. Deterministic Chemistry Diagram Engine
 # ------------------------------------------------------------------------------
+def visual_request_kind(text: str) -> str:
+    """Route visual requests without assuming all drawings fit an SVG primitive list.
+
+    Returns: 'mechanism', 'molecule', 'visual', or 'none'.
+    Mechanisms have their own accuracy restrictions; all other unsupported
+    visuals use a purpose-built image generator rather than guessed SVG coords.
+    """
+    s = (text or "").strip().lower()
+    if not s:
+        return "none"
+    visual_terms = (
+        "draw", "sketch", "diagram", "picture", "image", "illustrat",
+        "visuali", "depict", "render", "show me", "make an image",
+        "generate an image", "generate a picture", "generate a diagram",
+    )
+    visual = any(term in s for term in visual_terms)
+    if not visual:
+        return "none"
+    mech_terms = (
+        "mechanism", "curly arrow", "curved arrow", "electron pushing",
+        "electron-pushing", "nucleophilic substitution", "electrophilic substitution",
+        "electrophilic addition", "nucleophilic addition",
+    )
+    if any(term in s for term in mech_terms):
+        return "mechanism"
+    molecular_terms = (
+        "skeletal formula", "skeletal structure", "structural formula",
+        "displayed formula", "molecular structure", "organic structure",
+        "bond-line", "bond line", "structure of", "structure for",
+        "show the molecule", "draw the molecule", "chemical structure",
+    )
+    if any(term in s for term in molecular_terms):
+        # Lewis dot diagrams require lone-pair layout RDKit does not guarantee.
+        if "lewis" not in s and "electron dot" not in s:
+            return "molecule"
+    return "visual"
+
+
 def is_diagram_request(text: str) -> bool:
-    """Detect requests that are better rendered as clean vector diagrams."""
-    if not text:
-        return False
-
-    text = text.lower().strip()
-
-    strong_terms = [
-        "diagram",
-        "labelled diagram",
-        "labeled diagram",
-        "apparatus",
-        "experimental setup",
-        "experimental set-up",
-        "reaction setup",
-        "reaction set-up",
-        "electrolysis cell",
-        "electrochemical cell",
-        "galvanic cell",
-        "voltaic cell",
-        "titration setup",
-        "titration apparatus",
-        "distillation apparatus",
-        "fractional distillation",
-        "simple distillation",
-        "calorimetry setup",
-        "calorimeter",
-    ]
-
-    if any(term in text for term in strong_terms):
-        return True
-
-    # In this chemistry app, "draw" normally means a teaching diagram.
-    draw_phrases = [
-        "draw ",
-        "sketch ",
-        "show the setup",
-        "show the set-up",
-        "show the apparatus",
-    ]
-
-    return any(phrase in text for phrase in draw_phrases)
-
+    """Compatibility wrapper. Does not force arbitrary 'draw' requests to SVG."""
+    return visual_request_kind(text) in {"mechanism", "molecule"}
 
 
 def is_fischer_esterification_mechanism_request(request: str) -> bool:
@@ -2042,6 +2052,224 @@ def render_fischer_esterification_svg() -> str:
     parts.append('</g>')
     parts.append('</svg></div>')
     return "".join(parts)
+
+
+def is_friedel_crafts_acylation_request(request: str) -> bool:
+    s = re.sub(r"[^a-z0-9]+", " ", (request or "").lower())
+    return ("friedel" in s and "crafts" in s and "acyl" in s)
+
+
+def friedel_crafts_acylation_spec() -> dict:
+    """Curated generic electrophilic aromatic substitution, not model geometry."""
+    return {
+        "template": "friedel_crafts_acylation_v1",
+        "title": "Friedel–Crafts acylation: curved-arrow mechanism",
+        "caption": (
+            "Generic benzene acylation by RCOCl/AlCl₃: formation of the acylium ion, "
+            "electrophilic attack to give an arenium ion, then deprotonation and "
+            "restoration of aromaticity. R is an alkyl or aryl substituent."
+        ),
+        "elements": [],
+    }
+
+
+def render_friedel_crafts_acylation_svg() -> str:
+    """Three large panels. Bonds/charges/arrow origins are curated, not AI placed."""
+    import math
+
+    def txt(x, y, content, size=26, *, anchor="middle", color="#17334d", bold=False):
+        return (f'<text x="{x}" y="{y}" text-anchor="{anchor}" '
+                f'font-family="Arial,sans-serif" font-weight="{700 if bold else 400}" '
+                f'font-size="{size}" fill="{color}">{html.escape(str(content))}</text>')
+
+    def line(x1,y1,x2,y2,w=3,color="#203a4d"):
+        return f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{color}" stroke-width="{w}" stroke-linecap="round"/>'
+
+    def curved(x1,y1,cx,cy,x2,y2,label=None):
+        p=(f'<path d="M {x1:.1f} {y1:.1f} Q {cx:.1f} {cy:.1f} {x2:.1f} {y2:.1f}" '
+           'fill="none" stroke="#1269b2" stroke-width="4" marker-end="url(#elec-head)"/>')
+        return p+(txt(cx,cy-17,label,19,color="#1269b2") if label else "")
+
+    def ring(cx,cy,rad=84,*,sigma=False,acyl=False):
+        vertices=[(cx+rad*math.cos(math.radians(-90+60*i)),
+                   cy+rad*math.sin(math.radians(-90+60*i))) for i in range(6)]
+        seq=[]
+        for i in range(6):
+            x1,y1=vertices[i]; x2,y2=vertices[(i+1)%6]
+            seq.append(line(x1,y1,x2,y2,4))
+        # Localised bonds in one valid Kekulé/resonance contributor.
+        bonds=((2,3),(4,5)) if sigma else ((0,1),(2,3),(4,5))
+        for a,b in bonds:
+            x1,y1=vertices[a]; x2,y2=vertices[b]
+            mx,my=(x1+x2)/2,(y1+y2)/2
+            # An inset parallel line preserves six-membered ring geometry.
+            k=0.79
+            seq.append(line(cx+(x1-cx)*k,cy+(y1-cy)*k,
+                            cx+(x2-cx)*k,cy+(y2-cy)*k,3))
+        topx,topy=vertices[0]
+        if sigma:
+            seq.append(line(topx,topy,topx,topy-48,3))
+            seq.append(txt(topx,topy-61,"C(=O)R",23))
+            seq.append(line(topx+7,topy-8,topx+28,topy-29,3))
+            seq.append(txt(topx+46,topy-37,"H",22))
+            plusx,plusy=vertices[1]
+            seq.append(txt(plusx+27,plusy-12,"+",26,color="#b02f37",bold=True))
+        elif acyl:
+            seq.append(line(topx,topy,topx,topy-45,3))
+            seq.append(txt(topx,topy-60,"C(=O)R",23))
+        return ''.join(seq),vertices
+
+    parts=["""<div style="max-width:1200px;margin:auto;background:white;border-radius:12px;
+      border:1px solid #d7e5ed;padding:8px;box-sizing:border-box">
+      <svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 1200 1530"
+       role="img" aria-label="Corrected three-stage Friedel-Crafts acylation mechanism">
+       <defs>
+         <marker id="elec-head" viewBox="0 0 10 10" refX="9" refY="5"
+           markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+           <path d="M0 0 L10 5 L0 10 Z" fill="#1269b2"/>
+         </marker>
+         <marker id="rxn-head" viewBox="0 0 10 10" refX="9" refY="5"
+           markerWidth="6" markerHeight="6" orient="auto">
+           <path d="M0 0 L10 5 L0 10 Z" fill="#596a79"/>
+         </marker>
+       </defs>
+       <rect x="0" y="0" width="1200" height="1530" fill="white"/>
+    """]
+    parts += [txt(600,59,"Friedel–Crafts acylation",40,bold=True),
+              txt(600,100,"Benzene + acyl chloride  — AlCl₃ catalyst → aryl ketone",24)]
+    headings=[
+      ("1", "Generate the acylium electrophile", "Acyl chloride coordinates to AlCl₃; chloride transfer produces the acylium ion."),
+      ("2", "Electrophilic attack: formation of the σ complex", "A benzene π bond attacks the electron-deficient carbon; aromaticity is temporarily lost."),
+      ("3", "Deprotonation restores aromaticity", "AlCl₄⁻ removes H⁺; C–H electrons remake a ring π bond, regenerating AlCl₃."),
+    ]
+    starts=(129,588,1047)
+    for y,(index,title,description) in zip(starts,headings):
+        parts.append(f'<rect x="30" y="{y}" width="1140" height="424" rx="15" fill="#f6fafe" stroke="#d8e8f2" stroke-width="2"/>')
+        parts.append(f'<circle cx="79" cy="{y+46}" r="26" fill="#155e91"/>')
+        parts.append(txt(79,y+54,index,26,color="white",bold=True))
+        parts.append(txt(129,y+55,title,29,anchor="start",bold=True))
+        parts.append(txt(67,y+391,description,20,anchor="start",color="#476174"))
+
+    y=starts[0]
+    parts.extend([
+        txt(270,y+211,"R—C(=O)—Cl  +  AlCl₃",33),
+        line(497,y+204,653,y+204,4),
+        '<path d="M 652 %d l -16 -9 v 18 Z" fill="#596a79"/>' % (y+204),
+        txt(907,y+205,"R—C≡O⁺  +  AlCl₄⁻",34),
+        txt(907,y+258,"resonance: R—C⁺=O",23,color="#476174"),
+        txt(605,y+313,"The electrophile is RCO⁺, not RCOCl itself.",24,color="#1269b2"),
+    ])
+
+    y=starts[1]
+    b,verts=ring(240,y+228)
+    parts.append(b)
+    # Acylium carbon is at the left of R—C≡O+, near x=545.
+    parts.append(txt(574,y+182,"R—C≡O⁺",31))
+    x1,y1=verts[0];x2,y2=verts[1]
+    parts.append(curved((x1+x2)/2,(y1+y2)/2,415,y+132,524,y+180,"π electrons"))
+    parts.append(line(688,y+215,753,y+215,4))
+    parts.append('<path d="M 751 %d l -15 -8 v 16 Z" fill="#596a79"/>' % (y+215))
+    b,verts2=ring(922,y+245,sigma=True)
+    parts.append(b)
+    parts.append(txt(922,y+364,"σ complex (arenium ion)",23,color="#476174"))
+
+    y=starts[2]
+    b,verts=ring(253,y+239,sigma=True)
+    parts.append(b)
+    parts.append(txt(504,y+200,"AlCl₄⁻",28))
+    # Electron-pair arrow from the chloride-bound base toward H at C0.
+    topx,topy=verts[0]
+    parts.append(curved(472,y+211,410,y+105,topx+40,topy-35,"base → H"))
+    # C-H electron pair toward C0-C1 bond to complete the aromatic system.
+    parts.append(curved(topx+22,topy-19,topx+115,topy-12,
+                        (verts[0][0]+verts[1][0])/2,(verts[0][1]+verts[1][1])/2,
+                        "C–H → π"))
+    parts.append(line(625,y+241,717,y+241,4))
+    parts.append('<path d="M 716 %d l -16 -9 v 18 Z" fill="#596a79"/>' % (y+241))
+    b,_=ring(864,y+241,acyl=True)
+    parts.append(b)
+    parts.append(txt(1011,y+288,"+  HCl",24,anchor="start"))
+    parts.append(txt(1011,y+323,"+  AlCl₃",24,anchor="start"))
+    parts.append(txt(862,y+370,"aryl ketone",23,color="#476174"))
+    parts.append('</svg></div>')
+    return ''.join(parts)
+
+
+def is_molecular_structure_request(request: str) -> bool:
+    return visual_request_kind(request) == "molecule"
+
+
+def create_molecule_spec(request: str) -> dict:
+    """Groq names/SMILES mapping; RDKit then checks the molecular syntax/valence."""
+    try:
+        from rdkit import Chem
+    except ImportError as exc:
+        raise RuntimeError("The chemistry structure renderer requires the rdkit package.") from exc
+
+    explicit = re.search(r"\bSMILES\s*[:=]\s*([^\s,;]+)", request, re.I)
+    if explicit:
+        candidate = explicit.group(1).strip()
+        label = "Structure from supplied SMILES"
+    else:
+        prompt = (
+            "You are a chemistry name-to-SMILES assistant. Return valid JSON with "
+            "two strings: smiles, name. Only convert the EXACT compound in the user's "
+            "request. Include stereochemistry where specified. Never invent a "
+            "stereoisomer. If unclear, leave smiles empty. Return no explanation."
+        )
+        response = client.chat.completions.create(
+            model=selected_model,
+            messages=[{"role":"system","content":prompt},
+                      {"role":"user","content":request}],
+            response_format={"type":"json_object"},
+            reasoning_format="hidden",
+            reasoning_effort="low",
+            temperature=0,
+            max_completion_tokens=1200,
+        )
+        data = _extract_json_object(response.choices[0].message.content or "")
+        candidate = str(data.get("smiles", "")).strip()
+        label = str(data.get("name", "Molecular structure")).strip()[:100]
+
+    if len(candidate)>500 or not candidate:
+        raise ValueError("I couldn't determine an unambiguous molecular structure.")
+    mol = Chem.MolFromSmiles(candidate)
+    if mol is None or mol.GetNumAtoms()==0 or mol.GetNumAtoms()>130:
+        raise ValueError("The molecular structure failed chemical validation.")
+    canonical=Chem.MolToSmiles(mol, isomericSmiles=True)
+    return {
+       "template":"rdkit_structure_v1", "title":label,
+       "smiles":canonical,
+       "caption":("Molecular structure drawn from a chemically valid SMILES graph. "
+                  "For a compound specified only by name, double-check that "
+                  "the chosen isomer matches your question."),
+       "elements":[],
+    }
+
+
+def render_rdkit_structure_svg(spec: dict) -> str:
+    """Chemically valence-checked bond-line diagram, not LLM generated pixels."""
+    from rdkit import Chem
+    from rdkit.Chem import rdDepictor
+    from rdkit.Chem.Draw import rdMolDraw2D
+    smiles=str(spec.get('smiles',''))
+    if not smiles or len(smiles)>500:
+        raise ValueError("Invalid saved molecule specification")
+    mol=Chem.MolFromSmiles(smiles)
+    if mol is None or mol.GetNumAtoms()>130:
+        raise ValueError("Saved molecule is not chemically valid")
+    rdDepictor.Compute2DCoords(mol)
+    drawer = rdMolDraw2D.MolDraw2DSVG(950, 510)
+    drawer.DrawMolecule(mol)
+    drawer.FinishDrawing()
+    svg = drawer.GetDrawingText()
+    svg=re.sub(r'^<\?xml[^>]*>\s*','',svg)
+    svg=svg.replace('<svg ', '<svg style="max-width:100%;height:auto" ',1)
+    title=html.escape(str(spec.get('title','Molecular structure')))
+    return ('<div style="background:white;padding:20px;max-width:1000px;'
+            'border:1px solid #dce6ed;border-radius:12px">'
+            f'<h2 style="font-family:Arial;color:#19334a">{title}</h2>'
+            +svg+'</div>')
 
 
 def _extract_json_object(text: str):
@@ -2325,6 +2553,10 @@ def render_chemistry_svg(spec: dict) -> str:
     """
     if spec.get("template") == "fischer_esterification_v1":
         return render_fischer_esterification_svg()
+    if spec.get("template") == "friedel_crafts_acylation_v1":
+        return render_friedel_crafts_acylation_svg()
+    if spec.get("template") == "rdkit_structure_v1":
+        return render_rdkit_structure_svg(spec)
 
     title = str(spec.get("title", "Chemistry diagram"))
     elements = spec.get("elements", [])
@@ -2632,6 +2864,8 @@ def display_chemistry_diagram(svg: str, height: int = 720):
     """Render the generated SVG safely inside Streamlit."""
     if "Five step acid catalysed Fischer esterification mechanism" in svg:
         height = 1800
+    if "Corrected three-stage Friedel-Crafts acylation mechanism" in svg:
+        height = 1630
     components.html(svg, height=height, scrolling=True)
 
 
@@ -2639,74 +2873,112 @@ def display_chemistry_diagram(svg: str, height: int = 720):
 # 7. AI Horde Image Generation
 # ------------------------------------------------------------------------------
 def is_image_request(text: str) -> bool:
-    """Detect non-diagram image requests for AI Horde."""
-    if not text:
-        return False
-
-    # Diagram requests must always use the deterministic SVG renderer.
-    if is_diagram_request(text):
-        return False
-
-    text = text.lower().strip()
-
-    image_patterns = [
-        r"\bgenerate (?:an? )?(?:image|picture|illustration)\b",
-        r"\bcreate (?:an? )?(?:image|picture|illustration)\b",
-        r"\bmake (?:me )?(?:an? )?(?:image|picture|illustration)\b",
-        r"\bshow me (?:an? |the )?(?:image|picture|illustration)\b",
-    ]
-
-    return any(re.search(pattern, text) for pattern in image_patterns)
+    """Any visual prompt beyond curated reaction templates can use a real image model."""
+    return visual_request_kind(text) != "none"
 
 
 def create_chemistry_image_prompt(user_request: str, retrieved_chunks=None) -> str:
-    """
-    Use GPT-OSS to turn the user's request into a concise prompt for an
-    educational chemistry image generator.
-    """
-    retrieved_chunks = retrieved_chunks or []
-
-    context = "\n\n".join(
-        format_chunk_for_context(chunk)
-        for chunk in retrieved_chunks[:2]
-    )
-
-    system_message = """
-You convert image requests into precise prompts for an educational
-OCR A Level Chemistry image generator.
-
-Requirements:
-- preserve the chemistry requested by the user
-- make the science accurate at OCR A Level
-- use a clean educational illustration or textbook-diagram style
-- use a plain light background
-- use correct laboratory apparatus and molecular geometry where relevant
-- avoid decorative clutter
-- use very little written text because diffusion image models often render
-  text badly
-- if labels are essential, keep them short and simple
-- never add unrelated objects
-- never invent a different reaction, compound, apparatus setup, or structure
-- return only the final image-generation prompt
-"""
-
-    if context:
-        system_message += (
-            "\n\nUse the following retrieved OCR material only when it is "
-            "relevant to the requested image:\n\n" + context
+    """Create clear image instructions; don't force non-chemistry art into chemistry."""
+    kind=visual_request_kind(user_request)
+    chemistry = kind in {"mechanism", "molecule"} or any(
+        w in user_request.lower() for w in (
+            "chemical", "chemistry", "acid", "alkali", "electrode", "molecule",
+            "distillation", "titration", "flask", "electrolysis", "atom", "bond",
         )
+    )
+    if not chemistry:
+        # Respect genuinely arbitrary image requests (people, objects, landscapes).
+        return user_request.strip()
 
+    # Retrieve no verbatim personal chat or PDF content into image providers.
+    guide = """Create an accurate educational figure for OCR A Level Chemistry.
+Use a clean white background, legible labels, no overlap, and a spacious layout.
+Prioritise accurate chemistry over decorative composition. Do not invent
+chemical intermediates, bonds, charges, reagents, catalysts, or electron arrows.
+For mechanisms: show reactants, electrophiles/nucleophiles, each intermediate,
+formal charges, and electron-pair arrows that START at the relevant bond or
+lone pair and END at the atom or bond accepting electrons. If exact arrow
+placement is uncertain, omit dubious arrows rather than fabricating them.
+For lab apparatus: correct labels, connected apparatus and physically plausible
+liquid levels; keep labels short and outside the apparatus.
+For all scientific illustrations: make a large readable textbook plate.
+"""
+    if kind == "mechanism":
+        guide += "Use separate numbered reaction stages with skeletal molecular structures.\n"
+    return guide + "\nRequested figure: " + user_request.strip()
+
+
+def generate_openai_image(prompt: str, status_placeholder=None) -> tuple[bytes,str]:
+    """Optional higher-quality image renderer (paid API; not supplied by Groq)."""
+    if not OPENAI_IMAGE_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not configured for image generation")
+    if status_placeholder is not None:
+        status_placeholder.info("Drawing image with the dedicated image model...")
+    try:
+        response=requests.post(
+            "https://api.openai.com/v1/images/generations",
+            headers={
+                "Authorization": f"Bearer {OPENAI_IMAGE_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": OPENAI_IMAGE_MODEL,
+                "prompt": prompt[:16000],
+                "n": 1,
+                "size": "1536x1024",
+                "quality": "high",
+                "output_format": "png",
+            },
+            timeout=240,
+        )
+        if not response.ok:
+            # Never print provider response bodies, which may echo submitted text.
+            raise RuntimeError(f"Image provider rejected request (HTTP {response.status_code})")
+        data=response.json().get("data") or []
+        if not data or not data[0].get("b64_json"):
+            raise RuntimeError("Image provider returned no image bytes")
+        image_bytes=base64.b64decode(data[0]["b64_json"],validate=True)
+        if not image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise RuntimeError("Image provider did not return a valid PNG")
+        if len(image_bytes)>18*1024*1024:
+            raise RuntimeError("Image exceeds the allowed storage size")
+        return image_bytes, OPENAI_IMAGE_MODEL
+    except requests.RequestException as exc:
+        raise RuntimeError("Image provider connection failed; please try again") from exc
+
+
+def generate_visual_image(prompt: str, status_placeholder=None) -> tuple[bytes,str]:
+    """In auto mode, use dedicated image API when configured, otherwise AI Horde."""
+    if IMAGE_PROVIDER=="openai":
+        return generate_openai_image(prompt,status_placeholder)
+    if IMAGE_PROVIDER=="horde":
+        return generate_horde_image(prompt,status_placeholder=status_placeholder)
+    if OPENAI_IMAGE_API_KEY:
+        return generate_openai_image(prompt,status_placeholder)
+    return generate_horde_image(prompt,status_placeholder=status_placeholder)
+
+
+def chemistry_mechanism_notes(user_request: str) -> str:
+    """Separate verified-looking prose from inherently unverified generated pixels."""
     response = client.chat.completions.create(
         model=selected_model,
         messages=[
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": user_request},
+            {"role":"system", "content": (
+                "You are an OCR A Chemistry examiner and teacher. For the requested "
+                "reaction mechanism, explain each step in 3-6 brief numbered steps. "
+                "State the precise electron-pair source and destination, the "
+                "reagent/catalyst, formal charges, and any intermediate. "
+                "Never claim to have checked or validated an externally generated "
+                "image. If the prompt is ambiguous, say what is missing. "
+                "Give cautious and chemically accurate exam-focused text."
+            )},
+            {"role":"user","content":user_request},
         ],
         temperature=0.1,
+        max_completion_tokens=1000,
+        reasoning_format="hidden",
     )
-
-    prompt = response.choices[0].message.content or user_request
-    return prompt.strip()
+    return (response.choices[0].message.content or "").strip()
 
 
 def _horde_error_message(response, action: str) -> str:
@@ -2875,7 +3147,7 @@ def generate_horde_image(
 # ------------------------------------------------------------------------------
 st.title("🧪 OCR A Level Chemistry AI Assistant")
 st.caption(
-    "Grounded on OCR A specifications, mark schemes, data sheets and skills material. Chemistry diagrams are rendered as clean vectors."
+    "OCR-aligned explanations, curated mechanisms and chemistry-aware molecular structures. Other images use an image model and may need verification."
 )
 
 # Load the currently selected conversation from the database on every rerun.
@@ -2978,22 +3250,24 @@ if user_input := st.chat_input("Ask a question about OCR Chemistry..."):
     # --------------------------------------------------------------------------
     # Deterministic chemistry diagram route
     # --------------------------------------------------------------------------
-    if is_diagram_request(user_input):
+    kind = visual_request_kind(user_input)
+    known_mechanism = kind == "mechanism" and (
+        is_fischer_esterification_mechanism_request(user_input)
+        or is_friedel_crafts_acylation_request(user_input)
+    )
+    if known_mechanism or kind == "molecule":
         with st.chat_message("assistant"):
             status_placeholder = st.empty()
 
             try:
-                status_placeholder.info("Building a clean chemistry diagram...")
+                status_placeholder.info("Building a chemically structured drawing...")
 
-                diagram_context = retrieve_relevant_context(
-                    user_input,
-                    top_k=2,
-                )
-
-                diagram_spec = create_chemistry_diagram_spec(
-                    user_input,
-                    retrieved_chunks=diagram_context,
-                )
+                if kind == "molecule":
+                    diagram_spec = create_molecule_spec(user_input)
+                elif is_friedel_crafts_acylation_request(user_input):
+                    diagram_spec = friedel_crafts_acylation_spec()
+                else:
+                    diagram_spec = fischer_esterification_diagram_spec()
 
                 svg = render_chemistry_svg(diagram_spec)
                 status_placeholder.empty()
@@ -3048,7 +3322,7 @@ if user_input := st.chat_input("Ask a question about OCR Chemistry..."):
         st.stop()
 
     # --------------------------------------------------------------------------
-    # AI Horde image request route
+    # Any other visual request: a real image generation model, not guessed SVG
     # --------------------------------------------------------------------------
     if is_image_request(user_input):
         with st.chat_message("assistant"):
@@ -3057,25 +3331,25 @@ if user_input := st.chat_input("Ask a question about OCR Chemistry..."):
             try:
                 status_placeholder.info("Preparing the chemistry image prompt...")
 
-                image_context = retrieve_relevant_context(
-                    user_input,
-                    top_k=2,
-                )
-
-                image_prompt = create_chemistry_image_prompt(
-                    user_input,
-                    retrieved_chunks=image_context,
-                )
-
-                image_bytes, image_model = generate_horde_image(
-                    image_prompt,
-                    status_placeholder=status_placeholder,
-                    max_wait_seconds=300,
+                image_prompt = create_chemistry_image_prompt(user_input)
+                image_bytes, image_model = generate_visual_image(
+                    image_prompt, status_placeholder=status_placeholder
                 )
 
                 status_placeholder.empty()
 
-                caption = f"AI-generated image · {image_model}"
+                is_mechanism = kind == "mechanism"
+                caption = (
+                    f"AI-generated illustration · {image_model}"
+                    + (" · NOT chemically verified: check all arrows and charges"
+                       if is_mechanism else "")
+                )
+                if is_mechanism:
+                    st.warning(
+                        "AI-generated mechanism illustrations are not chemically "
+                        "verified. Check every arrow, intermediate and charge "
+                        "against the written steps and your course materials."
+                    )
 
                 st.image(
                     image_bytes,
@@ -3113,6 +3387,20 @@ if user_input := st.chat_input("Ask a question about OCR Chemistry..."):
                         "caption": caption,
                     }
                 )
+                if is_mechanism:
+                    try:
+                        notes = chemistry_mechanism_notes(user_input)
+                    except Exception:
+                        notes = (
+                            "The image is illustrative only. Ask for a written "
+                            "step-by-step mechanism to check the electron flow."
+                        )
+                    st.markdown("**Written electron-flow steps (use these to check the illustration):**")
+                    st.markdown(normalize_ai_response(notes))
+                    save_message("assistant", notes)
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": notes}
+                    )
 
             except Exception as err:
                 status_placeholder.empty()
