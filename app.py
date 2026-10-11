@@ -1532,7 +1532,7 @@ def _query_metadata_preferences(query: str):
     return requested_year, requested_paper
 
 
-def retrieve_relevant_context(query, top_k=10):
+def retrieve_relevant_context(query, top_k=6):
     """
     Retrieve OCR evidence using semantic similarity, source-aware reranking,
     metadata matching and a light diversity penalty.
