@@ -2,7 +2,7 @@ streamlit
 numpy
 pypdf
 sentence-transformers
-groq
+openai>=1.30,<3
 requests
 supabase>=2.0,<3.0
 rdkit>=2025.03
