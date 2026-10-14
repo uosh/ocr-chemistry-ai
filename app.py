@@ -12,7 +12,6 @@ import time
 import requests
 import numpy as np
 from pypdf import PdfReader
-from sentence_transformers import SentenceTransformer
 import streamlit as st
 import streamlit.components.v1 as components
 from openai import OpenAI
@@ -385,16 +384,47 @@ OPENROUTER_DENY_DATA_COLLECTION = _openrouter_setting_bool(
 OPENROUTER_ZDR_ONLY = _openrouter_setting_bool("OPENROUTER_ZDR_ONLY", False)
 
 
-def create_llm_completion(**kwargs):
-    """Common OpenRouter gateway for every language-model call.
+def safe_provider_error_code(error):
+    """A non-sensitive error category for app-owner diagnostics only.
 
-    Legacy provider-specific parameters are intentionally not sent. Provider privacy
-    preferences and reasoning controls are passed through the OpenAI SDK's
-    `extra_body`, which OpenRouter supports.
+    Never show raw provider errors; those can contain private prompts, request
+    metadata or account details. Status codes are enough to guide troubleshooting.
+    """
+    code = getattr(error, "status_code", None)
+    if code == 400:
+        return "invalid_parameters_400"
+    if code in (401, 403):
+        return "provider_authorisation"
+    if code == 402:
+        return "insufficient_credits_402"
+    if code == 404:
+        return "no_eligible_provider_404"
+    if code == 408:
+        return "provider_timeout_408"
+    if code == 429:
+        return "rate_limited_429"
+    if code in (500, 502, 503, 504):
+        return "provider_unavailable_5xx"
+    if isinstance(error, (ValueError, json.JSONDecodeError)):
+        return "invalid_json"
+    if isinstance(error, (TimeoutError, ConnectionError)):
+        return "network_timeout"
+    return "review_provider_error"
+
+
+def create_llm_completion(**kwargs):
+    """OpenRouter gateway with reviewer-model compatibility handling.
+
+    Qwen3 30B Instruct 2507 is a non-thinking model, so reasoning controls that
+    are appropriate for GPT-OSS are deliberately omitted for this reviewer.
+    Only retry unsupported JSON *parameters* after HTTP 400; parse and check
+    the resulting JSON separately, never treat free-form output as verified.
     """
     if "reasoning_format" in kwargs:
-        raise ValueError("The legacy reasoning_format parameter is not supported by OpenRouter")
+        raise ValueError("Legacy reasoning_format is not supported by OpenRouter")
 
+    requested_model = str(kwargs.get("model", ""))
+    is_qwen_instruct = requested_model.startswith("qwen/qwen3-30b-a3b-instruct")
     effort = kwargs.pop("reasoning_effort", None)
     extra_body = dict(kwargs.pop("extra_body", None) or {})
     provider = dict(extra_body.get("provider") or {})
@@ -402,19 +432,48 @@ def create_llm_completion(**kwargs):
         provider["data_collection"] = "deny"
     if OPENROUTER_ZDR_ONLY:
         provider["zdr"] = True
-    if kwargs.get("response_format") is not None:
+    has_json_mode = kwargs.get("response_format") is not None
+    if has_json_mode:
         provider["require_parameters"] = True
     if provider:
         extra_body["provider"] = provider
 
-    # Model reasoning is hidden from end users but is included in provider
-    # token usage / billing. The verifier and JSON paths request low effort.
-    if effort is not None:
+    # Qwen Instruct is non-thinking. Do not send reasoning controls that may
+    # unnecessarily disqualify all available OpenRouter provider routes.
+    if effort is not None and not is_qwen_instruct:
         extra_body["reasoning"] = {"effort": effort, "exclude": True}
+    if is_qwen_instruct and "max_completion_tokens" in kwargs:
+        kwargs["max_tokens"] = kwargs.pop("max_completion_tokens")
     if extra_body:
         kwargs["extra_body"] = extra_body
 
-    return client.chat.completions.create(**kwargs)
+    def _issue_request(payload):
+        return client.chat.completions.create(**payload)
+
+    try:
+        return _issue_request(kwargs)
+    except Exception as exc:
+        # For a reviewer call using JSON-object mode, a 400 can mean that its
+        # selected provider doesn't support that format. One bounded retry
+        # uses the review prompt's JSON-only instruction, after which normal
+        # validation STILL rejects malformed or inappropriate output.
+        if not (is_qwen_instruct and has_json_mode
+                and getattr(exc, "status_code", None) == 400):
+            raise
+        retry = dict(kwargs)
+        retry.pop("response_format", None)
+        retry_extra = dict(retry.get("extra_body") or {})
+        retry_provider = dict(retry_extra.get("provider") or {})
+        retry_provider.pop("require_parameters", None)
+        if retry_provider:
+            retry_extra["provider"] = retry_provider
+        else:
+            retry_extra.pop("provider", None)
+        if retry_extra:
+            retry["extra_body"] = retry_extra
+        else:
+            retry.pop("extra_body", None)
+        return _issue_request(retry)
 
 # AI Horde is used only for non-diagram image generation.
 horde_api_key = (
@@ -1374,10 +1433,23 @@ def chunk_structured_text(
 
 @st.cache_resource(show_spinner="Loading embedding model...")
 def load_embedder():
+    from sentence_transformers import SentenceTransformer
     return SentenceTransformer(EMBEDDING_MODEL)
 
 
-embedder = load_embedder()
+try:
+    embedder = load_embedder()
+except (ImportError, RuntimeError) as exc:
+    # A separate deployment dependency problem, not a RAG result or LLM error.
+    st.error(
+        "The OCR search model could not load because its Python dependencies "
+        "are incompatible or incomplete. The app owner should check the "
+        "Streamlit deployment Python version and install matching PyTorch "
+        "and torchvision packages. No AI answer has been generated."
+    )
+    if st.session_state.get("admin_authenticated"):
+        st.caption("Embedding dependency error type: " + type(exc).__name__)
+    st.stop()
 
 
 @st.cache_data(show_spinner="Indexing OCR Knowledge Base...")
@@ -2234,7 +2306,8 @@ def verify_cited_claims_with_openrouter(answer, sources, completion_fn, model):
         )
         parsed = extract_json_from_verifier(response.choices[0].message.content)
         if parsed is None:
-            return {"status": "unavailable", "unsupported_occurrences": [], "warnings": []}
+            return {"status": "unavailable", "unsupported_occurrences": [], "warnings": [],
+                    "error_code": "invalid_json"}
         valid_occurrences = {item["occurrence"] for item in claims}
         rejected = [
             value for value in parsed["unsupported_occurrences"]
@@ -2248,8 +2321,9 @@ def verify_cited_claims_with_openrouter(answer, sources, completion_fn, model):
             "unsupported_occurrences": sorted(set(rejected)),
             "warnings": warnings,
         }
-    except Exception:
-        return {"status": "unavailable", "unsupported_occurrences": [], "warnings": []}
+    except Exception as exc:
+        return {"status": "unavailable", "unsupported_occurrences": [], "warnings": [],
+                "error_code": safe_provider_error_code(exc)}
 
 
 def apply_citation_review(answer, review):
@@ -4303,14 +4377,15 @@ def review_answer_for_chemistry(question, answer, sources, completion_fn, model)
                 raise
         obj = _review_json(result.choices[0].message.content)
         if not isinstance(obj, dict) or obj.get("status") not in {"pass", "revise", "uncertain"}:
-            return {"status": "unavailable", "issues": []}
+            return {"status": "unavailable", "issues": [], "error_code": "invalid_json"}
         issues = [str(i)[:320] for i in obj.get("issues", []) if isinstance(i, str)][:5]
         status = obj["status"]
         if issues and status == "pass":
             status = "revise"  # A purported pass with listed errors is inconsistent.
         return {"status": status, "issues": issues}
-    except Exception:
-        return {"status": "unavailable", "issues": []}
+    except Exception as exc:
+        return {"status": "unavailable", "issues": [],
+                "error_code": safe_provider_error_code(exc)}
 
 
 def repair_answer_for_chemistry(messages, answer, issues, completion_fn, model):
@@ -4666,10 +4741,11 @@ def screen_ocr_evidence(question, sources, completion_fn, model):
             "rejected": [s["citation_number"] for s in sources if s["citation_number"] not in chosen],
             "matched_quotes": chosen,
         }
-    except Exception:
+    except Exception as exc:
         return [], {
             "status": "unavailable", "kept": [],
             "rejected": [s["citation_number"] for s in sources],
+            "error_code": safe_provider_error_code(exc),
         }
 
 if user_input := st.chat_input("Ask a question about OCR Chemistry..."):
@@ -4911,11 +4987,17 @@ if user_input := st.chat_input("Ask a question about OCR Chemistry..."):
 
     with st.chat_message("assistant"):
         if not citation_sources:
-            st.caption(
-                "No OCR passage passed the source relevance screening. "
-                "Answering from general chemistry knowledge; OCR marking "
-                "requirements will not be presented as verified."
-            )
+            if evidence_screen.get("status") == "unavailable":
+                st.caption(
+                    "OCR source screening could not complete. No source evidence "
+                    "will be treated as verified for this answer."
+                )
+            else:
+                st.caption(
+                    "No OCR passage passed the source relevance screening. "
+                    "Answering from general chemistry knowledge; OCR marking "
+                    "requirements will not be presented as verified."
+                )
         else:
             st.caption(f"Consulting {len(citation_sources)} OCR PDF source page(s) before answering…")
 
@@ -5039,6 +5121,8 @@ if st.session_state.get("admin_authenticated") and st.session_state.get("show_ra
                 + " · excluded: " + str(evidence_screen.get("rejected", []))
             )
             st.caption("Reviewer model: " + trace.get("review_model", "unknown"))
+            if evidence_screen.get("error_code"):
+                st.warning("OCR evidence screening: " + evidence_screen["error_code"])
             st.caption("Retrieval query: " + trace.get("retrieval_query", trace["question"]))
             st.write(
                 f"OCR source pages sent: **{len(selected)}** "
@@ -5064,10 +5148,15 @@ if st.session_state.get("admin_authenticated") and st.session_state.get("show_ra
             accuracy = st.session_state.get("rag_last_accuracy")
             if accuracy:
                 st.caption("Chemistry quality check: " + accuracy.get("status", "unknown"))
+                reviewer_error = accuracy.get("review", {}).get("error_code")
+                if reviewer_error:
+                    st.warning("Chemistry reviewer: " + reviewer_error)
                 if accuracy.get("problems"):
                     st.text("Issues: " + "; ".join(accuracy["problems"]))
             review = st.session_state.get("rag_last_review")
             if review:
+                if review.get("error_code"):
+                    st.warning("Citation reviewer: " + review["error_code"])
                 st.caption(
                     f"Citation review: {review.get('status')}"
                     + (f" · flagged citation occurrences: {review.get('unsupported_occurrences')}"
