@@ -1,8 +1,13 @@
-streamlit
-numpy
-pypdf
-sentence-transformers
+# Recommended for a Streamlit Community Cloud deployment using Python 3.12.
+# Avoid the untested Python 3.14 dependency combination visible in the traceback.
+streamlit>=1.40,<2
+numpy>=1.26,<3
+pypdf>=5,<7
+sentence-transformers>=3.4,<6
+transformers>=4.49,<5
+# torchvision and torch should resolve as a matching pair via pip.
+torchvision>=0.21,<1
 openai>=1.30,<3
-requests
+requests>=2.31,<3
 supabase>=2.0,<3.0
 rdkit>=2025.03
